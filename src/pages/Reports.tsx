@@ -439,7 +439,7 @@ export default function Reports() {
   }
 
   return (
-    <div className="p-8 max-w-5xl">
+    <div className="p-8 w-full">
       {/* Header */}
       <div className="flex items-center gap-3 mb-6">
         <div className="w-10 h-10 bg-slate-100 rounded-xl flex items-center justify-center">
