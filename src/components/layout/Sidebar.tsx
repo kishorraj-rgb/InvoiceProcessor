@@ -86,23 +86,34 @@ export default function Sidebar() {
       } min-h-screen bg-slate-900 flex flex-col transition-all duration-200 ease-in-out shrink-0`}
     >
       {/* Logo + collapse toggle */}
-      <div className="h-16 flex items-center justify-between border-b border-slate-700 px-3 gap-2">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div className="w-8 h-8 shrink-0 bg-indigo-500 rounded-lg flex items-center justify-center">
-            <FileText size={16} className="text-white" />
-          </div>
-          {!collapsed && (
-            <span className="font-semibold text-white text-lg whitespace-nowrap">InvoiceAI</span>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={toggle}
-          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          className="w-7 h-7 flex-shrink-0 flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 text-slate-500 hover:text-slate-200 transition-all duration-150"
-        >
-          {collapsed ? <ChevronRight size={13} /> : <ChevronLeft size={13} />}
-        </button>
+      <div className="h-16 flex items-center border-b border-slate-700 px-3">
+        {collapsed ? (
+          <button
+            type="button"
+            onClick={toggle}
+            title="Expand sidebar"
+            className="w-8 h-8 mx-auto flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 text-slate-500 hover:text-slate-200 transition-all duration-150"
+          >
+            <ChevronRight size={13} />
+          </button>
+        ) : (
+          <>
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              <div className="w-8 h-8 shrink-0 bg-indigo-500 rounded-lg flex items-center justify-center">
+                <FileText size={16} className="text-white" />
+              </div>
+              <span className="font-semibold text-white text-lg whitespace-nowrap">InvoiceAI</span>
+            </div>
+            <button
+              type="button"
+              onClick={toggle}
+              title="Collapse sidebar"
+              className="w-7 h-7 flex-shrink-0 flex items-center justify-center rounded-full bg-slate-800 hover:bg-slate-700 text-slate-500 hover:text-slate-200 transition-all duration-150"
+            >
+              <ChevronLeft size={13} />
+            </button>
+          </>
+        )}
       </div>
 
       {/* Main Navigation */}
