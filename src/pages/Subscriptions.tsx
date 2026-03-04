@@ -24,6 +24,7 @@ import {
 } from '../lib/supabase';
 import { extractInvoiceData } from '../lib/claude';
 import type { Subscription, SubscriptionInvoice } from '../types';
+import SubscriptionTabBar from '../components/SubscriptionTabBar';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -369,6 +370,8 @@ export default function Subscriptions() {
 
   return (
     <div className="p-8 space-y-5">
+
+      <SubscriptionTabBar />
 
       {/* Header */}
       <div className="flex items-center justify-between">
