@@ -738,7 +738,7 @@ export default function Subscriptions() {
               <p className="font-semibold text-slate-800 text-sm">
                 {editingSub ? 'Edit Subscription' : 'New Subscription'}
               </p>
-              <button type="button" onClick={() => { setShowForm(false); setEditingSub(null); setPendingFile(null); setPendingNewSubData(null); }} className="text-slate-400 hover:text-slate-600">
+              <button type="button" title="Close" onClick={() => { setShowForm(false); setEditingSub(null); setPendingFile(null); setPendingNewSubData(null); }} className="text-slate-400 hover:text-slate-600">
                 <X size={16} />
               </button>
             </div>
@@ -1100,92 +1100,23 @@ export default function Subscriptions() {
                         </div>
                       )}
 
-                      {/* Drop zone (visible when form is not open) */}
+                      {/* Add Invoice button (visible when form is not open) */}
                       {showInvoiceForm !== sub.id && (
                         <div className="mt-3">
-                          <label
-                            onDragOver={e => { e.preventDefault(); setDragOverId(sub.id); }}
-                            onDragLeave={() => setDragOverId(null)}
-                            onDrop={e => {
-                              e.preventDefault();
-                              setDragOverId(null);
-                              const file = e.dataTransfer.files[0];
-                              if (file) handleFileDrop(file, sub.id);
-                            }}
-                            className={`block border-2 border-dashed rounded-lg p-4 text-center transition-all cursor-pointer ${
-                              dragOverId === sub.id
-                                ? 'border-indigo-400 bg-indigo-50'
-                                : 'border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/30'
-                            }`}
+                          <button
+                            type="button"
+                            onClick={() => openInvoiceForm(sub.id)}
+                            className="flex items-center gap-1.5 text-xs text-indigo-600 hover:text-indigo-700 font-medium"
                           >
-                            <input
-                              type="file"
-                              accept=".pdf,.jpg,.jpeg,.png"
-                              className="hidden"
-                              title="Upload invoice file"
-                              onChange={e => {
-                                const file = e.target.files?.[0];
-                                if (file) handleFileDrop(file, sub.id);
-                                e.target.value = '';
-                              }}
-                            />
-                            {extracting === sub.id ? (
-                              <div className="flex items-center justify-center gap-2 text-indigo-600">
-                                <Loader2 size={14} className="animate-spin" />
-                                <span className="text-xs font-medium">Extracting invoice data…</span>
-                              </div>
-                            ) : (
-                              <>
-                                <Upload size={16} className="mx-auto mb-1 text-slate-400" />
-                                <p className="text-xs text-slate-600 font-medium">Drop invoice PDF here, or click to browse</p>
-                                <p className="text-[11px] text-slate-400 mt-0.5">PDF · JPG · PNG — fields auto-fill from AI</p>
-                              </>
-                            )}
-                          </label>
-                          {extracting !== sub.id && (
-                            <button
-                              type="button"
-                              onClick={() => openInvoiceForm(sub.id)}
-                              className="mt-2 flex items-center gap-1.5 text-xs text-indigo-600 hover:text-indigo-700 font-medium"
-                            >
-                              <Plus size={12} />
-                              Add Manually
-                            </button>
-                          )}
+                            <Plus size={12} />
+                            Add Invoice
+                          </button>
                         </div>
                       )}
 
                       {/* Add Invoice inline form */}
                       {showInvoiceForm === sub.id ? (
                         <form onSubmit={e => handleSaveInvoice(e, sub.id)} className="mt-3 pt-3 border-t border-slate-200 space-y-3">
-                          {/* Mini drop zone inside form for re-extraction */}
-                          <div
-                            onDragOver={e => { e.preventDefault(); setDragOverId(sub.id + '-form'); }}
-                            onDragLeave={() => setDragOverId(null)}
-                            onDrop={e => {
-                              e.preventDefault();
-                              setDragOverId(null);
-                              const file = e.dataTransfer.files[0];
-                              if (file) handleFileDrop(file, sub.id);
-                            }}
-                            className={`border border-dashed rounded-lg px-3 py-2 flex items-center justify-center gap-2 text-xs cursor-default transition-all ${
-                              dragOverId === sub.id + '-form'
-                                ? 'border-indigo-400 bg-indigo-50 text-indigo-600'
-                                : 'border-slate-200 text-slate-400 hover:border-slate-300'
-                            }`}
-                          >
-                            {extracting === sub.id ? (
-                              <>
-                                <Loader2 size={12} className="animate-spin text-indigo-600" />
-                                <span className="text-indigo-600 font-medium">Extracting data…</span>
-                              </>
-                            ) : (
-                              <>
-                                <Upload size={12} />
-                                <span>Drop another PDF to re-fill fields</span>
-                              </>
-                            )}
-                          </div>
                           {pendingFile && showInvoiceForm === sub.id && (
                             <div className="flex items-center gap-2 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2 text-xs">
                               <FileText size={13} className="text-indigo-600 flex-shrink-0" />
