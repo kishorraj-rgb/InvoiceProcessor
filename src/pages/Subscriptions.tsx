@@ -165,10 +165,6 @@ export default function Subscriptions() {
   const [deletingSubId, setDeletingSubId] = useState<string | null>(null);
   const [deletingInvId, setDeletingInvId] = useState<string | null>(null);
 
-  // AI extraction
-  const [extracting, setExtracting] = useState<string | null>(null); // subscription_id
-  const [dragOverId, setDragOverId] = useState<string | null>(null);
-
   // Top-level drop zone
   const [dropProcessing, setDropProcessing] = useState(false);
   const [dropCurrentFile, setDropCurrentFile] = useState<string | null>(null);
@@ -376,44 +372,6 @@ export default function Subscriptions() {
       exchange_rate: String(sub?.exchange_rate ?? 87),
     });
     setShowInvoiceForm(subId);
-  }
-
-  async function handleFileDrop(file: File, subId: string) {
-    const sub = subs.find(s => s.id === subId);
-    setExtracting(subId);
-    setPendingFile(file);
-    // Open the form immediately so the user sees it populate
-    setInvForm({
-      ...EMPTY_INV_FORM,
-      currency: sub?.currency ?? 'USD',
-      exchange_rate: String(sub?.exchange_rate ?? 87),
-    });
-    setShowInvoiceForm(subId);
-    try {
-      const extracted = await extractInvoiceData(file);
-      const subtotal = extracted.subtotal ?? 0;
-      const taxAmt = extracted.tax_amount ?? 0;
-      const computedTaxRate = subtotal > 0 ? parseFloat(((taxAmt / subtotal) * 100).toFixed(2)) : 0;
-      const baseAmount = subtotal > 0 ? subtotal : Math.max(0, (extracted.total_amount ?? 0) - taxAmt);
-      // Keep subscription's exchange rate (user-maintained), unless currency changed
-      const extractedCurrency = extracted.currency ?? sub?.currency ?? 'USD';
-      const rate = extractedCurrency === 'INR' ? '1' : String(sub?.exchange_rate ?? 87);
-      setInvForm({
-        invoice_number: extracted.invoice_number ?? '',
-        invoice_date: extracted.invoice_date ?? '',
-        billing_period_from: extracted.billing_period_from ?? '',
-        billing_period_to: extracted.billing_period_to ?? '',
-        currency: extractedCurrency,
-        amount: String(baseAmount),
-        tax_rate: String(computedTaxRate),
-        exchange_rate: rate,
-        notes: '',
-      });
-    } catch (err) {
-      alert(err instanceof Error ? err.message : 'Extraction failed. Fill in the form manually.');
-    } finally {
-      setExtracting(null);
-    }
   }
 
   async function handleSaveInvoice(e: React.FormEvent, subId: string) {
