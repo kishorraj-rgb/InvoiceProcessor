@@ -55,11 +55,29 @@ function fmtUSD(n: number) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(n);
 }
 
+// How many INR is 1 USD — used as fallback when exchange_rate is 1 or missing
+const FALLBACK_USD_INR = 87;
+
+/** Convert an amount in `currency` to INR, using stored exchange_rate (with fallback). */
+function amountToINR(amount: number, currency: string, exchangeRate: number | null | undefined): number {
+  if (currency === 'INR') return amount;
+  // exchange_rate stores orig_currency → INR; must be > 1 to be meaningful for non-INR
+  const rate = (exchangeRate ?? 0) > 1 ? (exchangeRate as number) : FALLBACK_USD_INR;
+  return amount * rate;
+}
+
+/** Convert an amount in `currency` to USD, using stored exchange_rate (with fallback). */
+function amountToUSD(amount: number, currency: string, exchangeRate: number | null | undefined): number {
+  if (currency === 'USD') return amount;
+  const inr = amountToINR(amount, currency, exchangeRate);
+  // Divide by USD/INR rate: use stored rate if currency is USD-like, else fallback
+  const usdInrRate = (exchangeRate ?? 0) > 1 ? (exchangeRate as number) : FALLBACK_USD_INR;
+  return currency === 'INR' ? amount / usdInrRate : inr / FALLBACK_USD_INR;
+}
+
 function toMonthlyUSD(sub: Subscription): number {
   if (sub.status === 'cancelled') return 0;
-  const usd = sub.currency === 'USD'
-    ? (sub.total_amount ?? 0)
-    : (sub.inr_amount ?? 0) / Math.max(sub.exchange_rate ?? 87, 1);
+  const usd = amountToUSD(sub.total_amount ?? 0, sub.currency, sub.exchange_rate);
   if (sub.billing_cycle === 'annual') return usd / 12;
   if (sub.billing_cycle === 'quarterly') return usd / 3;
   if (sub.billing_cycle === 'one-time') return 0;
@@ -67,9 +85,11 @@ function toMonthlyUSD(sub: Subscription): number {
 }
 
 function invToUSD(inv: { total_amount: number; currency: string; exchange_rate: number; inr_amount: number }): number {
-  return inv.currency === 'USD'
-    ? inv.total_amount
-    : inv.inr_amount / Math.max(inv.exchange_rate ?? 87, 1);
+  return amountToUSD(inv.total_amount, inv.currency, inv.exchange_rate);
+}
+
+function invToINR(inv: { total_amount: number; currency: string; exchange_rate: number; inr_amount: number }): number {
+  return amountToINR(inv.total_amount, inv.currency, inv.exchange_rate);
 }
 
 function fmtDate(d?: string) {
@@ -79,7 +99,7 @@ function fmtDate(d?: string) {
 
 function toMonthlyINR(sub: Subscription): number {
   if (sub.status === 'cancelled') return 0;
-  const inr = sub.inr_amount ?? 0;
+  const inr = amountToINR(sub.total_amount ?? 0, sub.currency, sub.exchange_rate);
   if (sub.billing_cycle === 'annual') return inr / 12;
   if (sub.billing_cycle === 'quarterly') return inr / 3;
   if (sub.billing_cycle === 'one-time') return 0;
@@ -1029,7 +1049,7 @@ export default function Subscriptions() {
                               </span>
                               <span className="text-slate-500 tabular-nums">{fmtCur(inv.total_amount, inv.currency)}</span>
                               <span className="text-slate-800 font-semibold tabular-nums">
-                                {viewCurrency === 'USD' ? fmtUSD(invToUSD(inv)) : fmtINR(inv.inr_amount)}
+                                {viewCurrency === 'USD' ? fmtUSD(invToUSD(inv)) : fmtINR(invToINR(inv))}
                               </span>
                               <div className="flex items-center gap-1">
                                 {inv.file_url && (
