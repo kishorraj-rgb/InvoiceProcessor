@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import {
   FileText,
@@ -9,6 +9,7 @@ import {
   IndianRupee,
   Percent,
   TrendingUp,
+  RefreshCw,
 } from 'lucide-react';
 import { getDashboardStats, getInvoices } from '../lib/supabase';
 import type { Invoice } from '../types';
@@ -106,6 +107,92 @@ function MonthlyBurnChart({ data }: { data: BurnBar[] }) {
         );
       })}
     </svg>
+  );
+}
+
+// ── Currency Widget ───────────────────────────────────────────────────────────
+
+interface FxRates { usdInr: number | null; usdIdr: number | null; updatedAt: Date | null; }
+
+function CurrencyWidget() {
+  const [rates, setRates] = useState<FxRates>({ usdInr: null, usdIdr: null, updatedAt: null });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+
+  const fetchRates = useCallback(async () => {
+    setLoading(true);
+    setError(false);
+    try {
+      const res = await fetch('https://api.frankfurter.app/latest?from=USD&to=INR,IDR');
+      if (!res.ok) throw new Error('fetch failed');
+      const data = await res.json();
+      setRates({
+        usdInr: data.rates.INR ?? null,
+        usdIdr: data.rates.IDR ?? null,
+        updatedAt: new Date(),
+      });
+    } catch {
+      setError(true);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchRates();
+    const id = setInterval(fetchRates, 5 * 60 * 1000); // refresh every 5 min
+    return () => clearInterval(id);
+  }, [fetchRates]);
+
+  const inrIdr = rates.usdInr && rates.usdIdr ? rates.usdIdr / rates.usdInr : null;
+
+  const pairs = [
+    { label: 'USD / INR', value: rates.usdInr?.toFixed(2) ?? null, flag: '🇺🇸→🇮🇳' },
+    { label: 'INR / IDR', value: inrIdr?.toFixed(2) ?? null, flag: '🇮🇳→🇮🇩' },
+    { label: 'USD / IDR', value: rates.usdIdr?.toLocaleString('en-US', { maximumFractionDigits: 0 }) ?? null, flag: '🇺🇸→🇮🇩' },
+  ];
+
+  const timeStr = rates.updatedAt
+    ? rates.updatedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : null;
+
+  return (
+    <div className="flex items-center gap-3 bg-white border border-slate-200 rounded-xl px-4 py-2.5 shadow-sm">
+      {/* Live indicator */}
+      <div className="flex items-center gap-1.5 pr-3 border-r border-slate-100">
+        <span className={`w-2 h-2 rounded-full shrink-0 ${error ? 'bg-red-400' : 'bg-emerald-400 animate-pulse'}`} />
+        <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Live FX</span>
+      </div>
+
+      {/* Rate pairs */}
+      {pairs.map(({ label, value, flag }) => (
+        <div key={label} className="flex items-center gap-2 px-3 border-r border-slate-100 last:border-0">
+          <span className="text-xs text-slate-400 whitespace-nowrap">{flag} {label}</span>
+          {loading ? (
+            <span className="w-12 h-3.5 bg-slate-100 rounded animate-pulse inline-block" />
+          ) : error || !value ? (
+            <span className="text-xs text-red-400">—</span>
+          ) : (
+            <span className="text-sm font-bold text-slate-800 tabular-nums">{value}</span>
+          )}
+        </div>
+      ))}
+
+      {/* Updated time + refresh */}
+      <div className="flex items-center gap-2 pl-1">
+        {timeStr && !loading && (
+          <span className="text-[10px] text-slate-400 whitespace-nowrap">{timeStr}</span>
+        )}
+        <button
+          onClick={fetchRates}
+          disabled={loading}
+          className="p-1 rounded-md hover:bg-slate-100 transition-colors text-slate-400 hover:text-slate-600 disabled:opacity-40"
+          title="Refresh rates"
+        >
+          <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -223,14 +310,15 @@ export default function Dashboard() {
     <div className="p-8 space-y-5">
 
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
+      <div className="flex items-center justify-between gap-4">
+        <div className="shrink-0">
           <h1 className="text-2xl font-bold text-slate-900">Financial Overview</h1>
           <p className="text-sm text-slate-500 mt-0.5">Track spend, invoices, and vendor performance</p>
         </div>
+        <CurrencyWidget />
         <Link
           to="/upload"
-          className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors"
+          className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors shrink-0"
         >
           <Upload size={15} />
           Process Invoice
