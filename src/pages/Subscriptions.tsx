@@ -597,14 +597,14 @@ export default function Subscriptions() {
           isDragActive
             ? 'border-indigo-400 bg-indigo-50 shadow-lg shadow-indigo-100'
             : 'border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/30'
-        } ${dropProcessing ? 'pointer-events-none opacity-60' : ''}`}
+        } ${queueBusy ? 'pointer-events-none opacity-60' : ''}`}
       >
         <input {...getInputProps()} />
         <div className="flex items-center gap-5 px-6 py-5">
           <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${
             isDragActive ? 'bg-indigo-100' : 'bg-slate-100'
           }`}>
-            {dropProcessing ? (
+            {queueBusy ? (
               <Loader2 size={24} className="text-indigo-600 animate-spin" />
             ) : (
               <Upload size={24} className={isDragActive ? 'text-indigo-600' : 'text-slate-400'} />
@@ -699,7 +699,7 @@ export default function Subscriptions() {
               <p className="font-semibold text-slate-800 text-sm">
                 {editingSub ? 'Edit Subscription' : 'New Subscription'}
               </p>
-              <button type="button" title="Close" onClick={() => { setShowForm(false); setEditingSub(null); setPendingFile(null); setPendingNewSubData(null); }} className="text-slate-400 hover:text-slate-600">
+              <button type="button" title="Close" onClick={() => { setShowForm(false); setEditingSub(null); setPendingFile(null); }} className="text-slate-400 hover:text-slate-600">
                 <X size={16} />
               </button>
             </div>
@@ -869,7 +869,7 @@ export default function Subscriptions() {
               <div className="flex gap-2 justify-end pt-1">
                 <button
                   type="button"
-                  onClick={() => { setShowForm(false); setEditingSub(null); setPendingFile(null); setPendingNewSubData(null); }}
+                  onClick={() => { setShowForm(false); setEditingSub(null); setPendingFile(null); }}
                   className="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 border border-slate-200 rounded-lg hover:bg-slate-50"
                 >
                   Cancel
