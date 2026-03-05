@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import {
   RefreshCw,
   Plus,
@@ -13,7 +13,11 @@ import {
   AlertCircle,
   Upload,
   Loader2,
+  FileText,
+  Sparkles,
+  CheckCircle,
 } from 'lucide-react';
+import { useDropzone } from 'react-dropzone';
 import {
   getSubscriptions,
   saveSubscription,
@@ -21,6 +25,7 @@ import {
   getSubscriptionInvoices,
   saveSubscriptionInvoice,
   deleteSubscriptionInvoice,
+  uploadSubscriptionInvoiceFile,
 } from '../lib/supabase';
 import { extractInvoiceData } from '../lib/claude';
 import type { Subscription, SubscriptionInvoice } from '../types';
@@ -86,6 +91,39 @@ function statusBadge(status: string) {
   return map[status] ?? 'bg-slate-100 text-slate-500';
 }
 
+// ── Fuzzy vendor matching ─────────────────────────────────────────────────────
+
+function fuzzyMatchSubscription(
+  extractedVendorName: string,
+  subscriptions: Subscription[],
+): Subscription | null {
+  if (!extractedVendorName) return null;
+  const needle = extractedVendorName.toLowerCase().trim();
+
+  // Pass 1: Exact (case-insensitive)
+  const exact = subscriptions.find(s => s.vendor_name.toLowerCase().trim() === needle);
+  if (exact) return exact;
+
+  // Pass 2: Substring containment (either direction)
+  const containsMatch = subscriptions.find(s => {
+    const subName = s.vendor_name.toLowerCase().trim();
+    return needle.includes(subName) || subName.includes(needle);
+  });
+  if (containsMatch) return containsMatch;
+
+  // Pass 3: Token-overlap scoring (≥50% shared tokens)
+  const needleTokens = new Set(needle.split(/\s+/));
+  let bestScore = 0;
+  let bestSub: Subscription | null = null;
+  for (const sub of subscriptions) {
+    const subTokens = new Set(sub.vendor_name.toLowerCase().trim().split(/\s+/));
+    const shared = [...needleTokens].filter(t => subTokens.has(t)).length;
+    const score = shared / Math.max(needleTokens.size, subTokens.size);
+    if (score > bestScore) { bestScore = score; bestSub = sub; }
+  }
+  return bestScore >= 0.5 ? bestSub : null;
+}
+
 // ── Default form states ───────────────────────────────────────────────────────
 
 const EMPTY_FORM = {
@@ -130,6 +168,20 @@ export default function Subscriptions() {
   // AI extraction
   const [extracting, setExtracting] = useState<string | null>(null); // subscription_id
   const [dragOverId, setDragOverId] = useState<string | null>(null);
+
+  // Top-level drop zone
+  const [dropProcessing, setDropProcessing] = useState(false);
+  const [dropCurrentFile, setDropCurrentFile] = useState<string | null>(null);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [pendingNewSubData, setPendingNewSubData] = useState<any>(null);
+  const [dropResult, setDropResult] = useState<{
+    fileName: string;
+    status: 'matched' | 'new' | 'error';
+    vendorName?: string;
+    matchedSubName?: string;
+    error?: string;
+  } | null>(null);
 
   useEffect(() => {
     getSubscriptions()
@@ -244,6 +296,46 @@ export default function Subscriptions() {
       );
       setShowForm(false);
       setEditingSub(null);
+
+      // If created from a dropped file, auto-create the first invoice
+      if (pendingNewSubData && pendingFile && !editingSub) {
+        const ext = pendingNewSubData;
+        const subtotal = ext.subtotal ?? 0;
+        const taxAmt2 = ext.tax_amount ?? 0;
+        const computedTaxRate = subtotal > 0 ? parseFloat(((taxAmt2 / subtotal) * 100).toFixed(2)) : 0;
+        const baseAmount = subtotal > 0 ? subtotal : Math.max(0, (ext.total_amount ?? 0) - taxAmt2);
+        const extractedCurrency = ext.currency ?? saved.currency;
+        const exchangeRate = extractedCurrency === 'INR' ? 1 : saved.exchange_rate;
+        const totalAmt = baseAmount + (baseAmount * computedTaxRate / 100);
+        const inrAmt = totalAmt * exchangeRate;
+        try {
+          const invPayload: Partial<SubscriptionInvoice> = {
+            subscription_id: saved.id,
+            invoice_number: ext.invoice_number || undefined,
+            invoice_date: ext.invoice_date || undefined,
+            billing_period_from: ext.billing_period_from || undefined,
+            billing_period_to: ext.billing_period_to || undefined,
+            currency: extractedCurrency,
+            amount: baseAmount,
+            tax_amount: taxAmt2,
+            total_amount: ext.total_amount ?? totalAmt,
+            exchange_rate: exchangeRate,
+            inr_amount: inrAmt,
+            file_name: pendingFile.name,
+          };
+          const savedInv = await saveSubscriptionInvoice(invPayload);
+          try {
+            const url = await uploadSubscriptionInvoiceFile(pendingFile, savedInv.id);
+            if (url) await saveSubscriptionInvoice({ id: savedInv.id, file_url: url });
+          } catch { console.error('File upload failed for auto-created invoice'); }
+          setInvoicesMap(prev => ({ ...prev, [saved.id]: [savedInv] }));
+          setExpandedId(saved.id);
+        } catch (invErr) {
+          console.error('Failed to auto-create first invoice:', invErr);
+        }
+        setPendingFile(null);
+        setPendingNewSubData(null);
+      }
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Failed to save');
     } finally {
@@ -289,6 +381,7 @@ export default function Subscriptions() {
   async function handleFileDrop(file: File, subId: string) {
     const sub = subs.find(s => s.id === subId);
     setExtracting(subId);
+    setPendingFile(file);
     // Open the form immediately so the user sees it populate
     setInvForm({
       ...EMPTY_INV_FORM,
@@ -339,10 +432,24 @@ export default function Subscriptions() {
       total_amount: total,
       exchange_rate: invForm.currency === 'INR' ? 1 : (parseFloat(invForm.exchange_rate) || 1),
       inr_amount: inr,
+      file_name: pendingFile?.name || undefined,
       notes: invForm.notes.trim() || undefined,
     };
     try {
       const saved = await saveSubscriptionInvoice(payload);
+      // Upload file to Supabase Storage if we have one pending
+      if (pendingFile) {
+        try {
+          const url = await uploadSubscriptionInvoiceFile(pendingFile, saved.id);
+          if (url) {
+            await saveSubscriptionInvoice({ id: saved.id, file_url: url });
+            saved.file_url = url;
+          }
+        } catch (uploadErr) {
+          console.error('File upload failed:', uploadErr);
+        }
+        setPendingFile(null);
+      }
       setInvoicesMap(prev => ({ ...prev, [subId]: [saved, ...(prev[subId] || [])] }));
       setShowInvoiceForm(null);
     } catch (err) {
@@ -361,6 +468,100 @@ export default function Subscriptions() {
     }
     setDeletingInvId(null);
   }
+
+  // ── Top-level drop zone handler ──
+  const onTopLevelDrop = useCallback(async (acceptedFiles: File[]) => {
+    if (acceptedFiles.length === 0) return;
+    const file = acceptedFiles[0];
+    setDropProcessing(true);
+    setDropCurrentFile(file.name);
+    setDropResult(null);
+
+    try {
+      const extracted = await extractInvoiceData(file);
+      const vendorName = extracted.vendor_name || '';
+      const matched = fuzzyMatchSubscription(vendorName, subs);
+
+      if (matched) {
+        // ── Match found: expand subscription, pre-fill invoice form ──
+        setExpandedId(matched.id);
+        if (!invoicesMap[matched.id]) {
+          setLoadingInvoices(prev => new Set(prev).add(matched.id));
+          try {
+            const invs = await getSubscriptionInvoices(matched.id);
+            setInvoicesMap(prev => ({ ...prev, [matched.id]: invs }));
+          } finally {
+            setLoadingInvoices(prev => { const s = new Set(prev); s.delete(matched.id); return s; });
+          }
+        }
+        const subtotal = extracted.subtotal ?? 0;
+        const taxAmt = extracted.tax_amount ?? 0;
+        const computedTaxRate = subtotal > 0 ? parseFloat(((taxAmt / subtotal) * 100).toFixed(2)) : 0;
+        const baseAmount = subtotal > 0 ? subtotal : Math.max(0, (extracted.total_amount ?? 0) - taxAmt);
+        const extractedCurrency = extracted.currency ?? matched.currency ?? 'USD';
+        const rate = extractedCurrency === 'INR' ? '1' : String(matched.exchange_rate ?? 87);
+        setInvForm({
+          invoice_number: extracted.invoice_number ?? '',
+          invoice_date: extracted.invoice_date ?? '',
+          billing_period_from: extracted.billing_period_from ?? '',
+          billing_period_to: extracted.billing_period_to ?? '',
+          currency: extractedCurrency,
+          amount: String(baseAmount),
+          tax_rate: String(computedTaxRate),
+          exchange_rate: rate,
+          notes: '',
+        });
+        setShowInvoiceForm(matched.id);
+        setPendingFile(file);
+        setDropResult({ fileName: file.name, status: 'matched', vendorName, matchedSubName: matched.vendor_name });
+      } else {
+        // ── No match: open Add Subscription form pre-filled ──
+        const subtotal = extracted.subtotal ?? 0;
+        const taxAmt = extracted.tax_amount ?? 0;
+        const computedTaxRate = subtotal > 0 ? parseFloat(((taxAmt / subtotal) * 100).toFixed(2)) : 0;
+        const baseAmount = subtotal > 0 ? subtotal : Math.max(0, (extracted.total_amount ?? 0) - taxAmt);
+        const extractedCurrency = extracted.currency ?? 'USD';
+        const rate = extractedCurrency === 'INR' ? '1' : '87';
+        setEditingSub(null);
+        setForm({
+          vendor_name: vendorName,
+          service_name: vendorName,
+          plan_name: '',
+          billing_cycle: 'monthly',
+          currency: extractedCurrency,
+          amount: String(baseAmount),
+          tax_rate: String(computedTaxRate),
+          exchange_rate: rate,
+          account_email: '',
+          category: extracted.category ?? '',
+          status: 'active',
+          start_date: extracted.invoice_date ?? '',
+          next_renewal_date: '',
+          notes: '',
+        });
+        setShowForm(true);
+        setPendingFile(file);
+        setPendingNewSubData(extracted);
+        setDropResult({ fileName: file.name, status: 'new', vendorName });
+      }
+    } catch (err) {
+      setDropResult({
+        fileName: file.name,
+        status: 'error',
+        error: err instanceof Error ? err.message : 'Extraction failed',
+      });
+    } finally {
+      setDropCurrentFile(null);
+      setDropProcessing(false);
+    }
+  }, [subs, invoicesMap]);
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop: onTopLevelDrop,
+    accept: { 'application/pdf': ['.pdf'], 'image/*': ['.jpg', '.jpeg', '.png'] },
+    disabled: dropProcessing,
+    noClick: false,
+  });
 
   // ── Computed form preview ──
   const formCalc = calcFormAmounts(form);
@@ -408,6 +609,107 @@ export default function Subscriptions() {
         ))}
       </div>
 
+      {/* ── Prominent Drop Zone ── */}
+      <div
+        {...getRootProps()}
+        className={`border-2 border-dashed rounded-xl transition-all cursor-pointer ${
+          isDragActive
+            ? 'border-indigo-400 bg-indigo-50 shadow-lg shadow-indigo-100'
+            : 'border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/30'
+        } ${dropProcessing ? 'pointer-events-none opacity-60' : ''}`}
+      >
+        <input {...getInputProps()} />
+        <div className="flex items-center gap-5 px-6 py-5">
+          <div className={`w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${
+            isDragActive ? 'bg-indigo-100' : 'bg-slate-100'
+          }`}>
+            {dropProcessing ? (
+              <Loader2 size={24} className="text-indigo-600 animate-spin" />
+            ) : (
+              <Upload size={24} className={isDragActive ? 'text-indigo-600' : 'text-slate-400'} />
+            )}
+          </div>
+          <div className="flex-1 min-w-0">
+            {dropProcessing ? (
+              <>
+                <p className="text-sm font-semibold text-indigo-700">
+                  Extracting from {dropCurrentFile}...
+                </p>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  AI is reading your invoice. This usually takes a few seconds.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-sm font-semibold text-slate-700">
+                  {isDragActive
+                    ? 'Drop your subscription invoice here'
+                    : 'Drop subscription invoices here, or click to browse'}
+                </p>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  PDF, JPG, PNG — AI will extract data and match to existing subscriptions automatically
+                </p>
+              </>
+            )}
+          </div>
+          {!dropProcessing && (
+            <div className="flex items-center gap-1.5 text-xs text-indigo-600 font-medium bg-indigo-50 px-3 py-1.5 rounded-lg border border-indigo-200 flex-shrink-0">
+              <Sparkles size={12} />
+              AI-Powered
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Drop result banner */}
+      {dropResult && !dropProcessing && (
+        <div className={`flex items-center gap-2 rounded-lg px-4 py-2.5 text-xs ${
+          dropResult.status === 'matched' ? 'bg-green-50 border border-green-200' :
+          dropResult.status === 'new' ? 'bg-amber-50 border border-amber-200' :
+          'bg-red-50 border border-red-200'
+        }`}>
+          {dropResult.status === 'matched' && (
+            <>
+              <CheckCircle size={14} className="text-green-500 flex-shrink-0" />
+              <span className="text-slate-700">
+                <span className="font-medium">{dropResult.fileName}</span>
+                {' — matched to '}
+                <span className="font-semibold text-indigo-600">{dropResult.matchedSubName}</span>
+                . Review and save the invoice below.
+              </span>
+            </>
+          )}
+          {dropResult.status === 'new' && (
+            <>
+              <Plus size={14} className="text-amber-500 flex-shrink-0" />
+              <span className="text-slate-700">
+                <span className="font-medium">{dropResult.fileName}</span>
+                {' — new vendor: '}
+                <span className="font-semibold text-amber-600">{dropResult.vendorName}</span>
+                . Fill in subscription details and save.
+              </span>
+            </>
+          )}
+          {dropResult.status === 'error' && (
+            <>
+              <AlertCircle size={14} className="text-red-500 flex-shrink-0" />
+              <span className="text-red-600">
+                <span className="font-medium">{dropResult.fileName}</span>
+                {' — '}{dropResult.error}
+              </span>
+            </>
+          )}
+          <button
+            type="button"
+            title="Dismiss"
+            onClick={() => setDropResult(null)}
+            className="ml-auto text-slate-400 hover:text-slate-600 flex-shrink-0"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
       {/* Main panel */}
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
 
@@ -436,7 +738,7 @@ export default function Subscriptions() {
               <p className="font-semibold text-slate-800 text-sm">
                 {editingSub ? 'Edit Subscription' : 'New Subscription'}
               </p>
-              <button type="button" onClick={() => { setShowForm(false); setEditingSub(null); }} className="text-slate-400 hover:text-slate-600">
+              <button type="button" onClick={() => { setShowForm(false); setEditingSub(null); setPendingFile(null); setPendingNewSubData(null); }} className="text-slate-400 hover:text-slate-600">
                 <X size={16} />
               </button>
             </div>
@@ -606,7 +908,7 @@ export default function Subscriptions() {
               <div className="flex gap-2 justify-end pt-1">
                 <button
                   type="button"
-                  onClick={() => { setShowForm(false); setEditingSub(null); }}
+                  onClick={() => { setShowForm(false); setEditingSub(null); setPendingFile(null); setPendingNewSubData(null); }}
                   className="px-4 py-2 text-sm text-slate-600 hover:text-slate-800 border border-slate-200 rounded-lg hover:bg-slate-50"
                 >
                   Cancel
@@ -884,6 +1186,18 @@ export default function Subscriptions() {
                               </>
                             )}
                           </div>
+                          {pendingFile && showInvoiceForm === sub.id && (
+                            <div className="flex items-center gap-2 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2 text-xs">
+                              <FileText size={13} className="text-indigo-600 flex-shrink-0" />
+                              <span className="text-indigo-700 flex-1 truncate">{pendingFile.name}</span>
+                              <span className="text-indigo-500 font-medium flex items-center gap-1">
+                                <Sparkles size={10} /> AI Extracted
+                              </span>
+                              <button type="button" title="Remove file" onClick={() => setPendingFile(null)} className="text-slate-400 hover:text-slate-600">
+                                <X size={13} />
+                              </button>
+                            </div>
+                          )}
                           <p className="text-xs font-semibold text-slate-600">Add Invoice</p>
                           <div className="grid grid-cols-4 gap-2">
                             <div>
@@ -968,7 +1282,7 @@ export default function Subscriptions() {
                           <div className="flex gap-2 justify-end">
                             <button
                               type="button"
-                              onClick={() => setShowInvoiceForm(null)}
+                              onClick={() => { setShowInvoiceForm(null); setPendingFile(null); }}
                               className="px-3 py-1.5 text-xs text-slate-600 border border-slate-200 rounded hover:bg-slate-50"
                             >
                               Cancel

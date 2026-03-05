@@ -248,6 +248,22 @@ export async function uploadInvoiceFile(file: File, invoiceId: string): Promise<
   return data.publicUrl;
 }
 
+export async function uploadSubscriptionInvoiceFile(file: File, subscriptionInvoiceId: string): Promise<string | null> {
+  const ext = file.name.split('.').pop();
+  const path = `subscription-invoices/${subscriptionInvoiceId}.${ext}`;
+
+  const { error } = await supabase.storage
+    .from('invoice-files')
+    .upload(path, file, { upsert: true });
+
+  if (error) {
+    throw new Error(`File upload failed: ${error.message}`);
+  }
+
+  const { data } = supabase.storage.from('invoice-files').getPublicUrl(path);
+  return data.publicUrl;
+}
+
 // ── Asset operations ──────────────────────────────────────────────────────────
 
 export async function getAssets(): Promise<Asset[]> {
