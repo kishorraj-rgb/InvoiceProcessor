@@ -335,14 +335,13 @@ export default function Subscriptions() {
   async function toggleExpand(id: string) {
     if (expandedId === id) { setExpandedId(null); return; }
     setExpandedId(id);
-    if (!invoicesMap[id]) {
-      setLoadingInvoices(prev => new Set(prev).add(id));
-      try {
-        const invs = await getSubscriptionInvoices(id);
-        setInvoicesMap(prev => ({ ...prev, [id]: invs }));
-      } finally {
-        setLoadingInvoices(prev => { const s = new Set(prev); s.delete(id); return s; });
-      }
+    // Always re-fetch from DB to ensure freshly saved invoices appear
+    setLoadingInvoices(prev => new Set(prev).add(id));
+    try {
+      const invs = await getSubscriptionInvoices(id);
+      setInvoicesMap(prev => ({ ...prev, [id]: invs }));
+    } finally {
+      setLoadingInvoices(prev => { const s = new Set(prev); s.delete(id); return s; });
     }
   }
 
@@ -414,6 +413,7 @@ export default function Subscriptions() {
     if (acceptedFiles.length === 0) return;
     setQueueBusy(true);
     setQueueItems(acceptedFiles.map(f => ({ fileName: f.name, status: 'pending' as const })));
+    let firstSavedSubId: string | null = null;
 
     for (let i = 0; i < acceptedFiles.length; i++) {
       const file = acceptedFiles[i];
@@ -457,6 +457,7 @@ export default function Subscriptions() {
             }
           } catch { /* upload non-fatal */ }
           setInvoicesMap(prev => ({ ...prev, [matched.id]: [savedInv, ...(prev[matched.id] || [])] }));
+          if (!firstSavedSubId) firstSavedSubId = matched.id;
           setQueueItems(prev => prev.map((item, idx) => idx === i
             ? { ...item, status: 'saved', subName: matched.vendor_name }
             : item,
@@ -505,6 +506,7 @@ export default function Subscriptions() {
             }
           } catch { /* upload non-fatal */ }
           setInvoicesMap(prev => ({ ...prev, [savedSub.id]: [savedInv] }));
+          if (!firstSavedSubId) firstSavedSubId = savedSub.id;
           setQueueItems(prev => prev.map((item, idx) => idx === i
             ? { ...item, status: 'saved', subName: `New: ${vendorName}` }
             : item,
@@ -518,6 +520,8 @@ export default function Subscriptions() {
       }
     }
     setQueueBusy(false);
+    // Auto-expand the first subscription that received an invoice
+    if (firstSavedSubId) setExpandedId(firstSavedSubId);
   }, [subs]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
