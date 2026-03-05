@@ -16,6 +16,9 @@ import {
   FileText,
   Sparkles,
   CheckCircle,
+  Eye,
+  ExternalLink,
+  DollarSign,
 } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
 import {
@@ -46,6 +49,27 @@ function fmtCur(n: number, currency = 'INR') {
 
 function fmtINR(n: number) {
   return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(n);
+}
+
+function fmtUSD(n: number) {
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(n);
+}
+
+function toMonthlyUSD(sub: Subscription): number {
+  if (sub.status === 'cancelled') return 0;
+  const usd = sub.currency === 'USD'
+    ? (sub.total_amount ?? 0)
+    : (sub.inr_amount ?? 0) / Math.max(sub.exchange_rate ?? 87, 1);
+  if (sub.billing_cycle === 'annual') return usd / 12;
+  if (sub.billing_cycle === 'quarterly') return usd / 3;
+  if (sub.billing_cycle === 'one-time') return 0;
+  return usd;
+}
+
+function invToUSD(inv: { total_amount: number; currency: string; exchange_rate: number; inr_amount: number }): number {
+  return inv.currency === 'USD'
+    ? inv.total_amount
+    : inv.inr_amount / Math.max(inv.exchange_rate ?? 87, 1);
 }
 
 function fmtDate(d?: string) {
@@ -165,19 +189,14 @@ export default function Subscriptions() {
   const [deletingSubId, setDeletingSubId] = useState<string | null>(null);
   const [deletingInvId, setDeletingInvId] = useState<string | null>(null);
 
-  // Top-level drop zone
-  const [dropProcessing, setDropProcessing] = useState(false);
-  const [dropCurrentFile, setDropCurrentFile] = useState<string | null>(null);
+  // Currency display toggle
+  const [viewCurrency, setViewCurrency] = useState<'USD' | 'INR'>('USD');
+  // File viewer modal
+  const [viewingFile, setViewingFile] = useState<{ url: string; name: string } | null>(null);
+  // Top-level drop zone – multi-file queue
   const [pendingFile, setPendingFile] = useState<File | null>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [pendingNewSubData, setPendingNewSubData] = useState<any>(null);
-  const [dropResult, setDropResult] = useState<{
-    fileName: string;
-    status: 'matched' | 'new' | 'error';
-    vendorName?: string;
-    matchedSubName?: string;
-    error?: string;
-  } | null>(null);
+  const [queueItems, setQueueItems] = useState<{ fileName: string; status: 'pending' | 'processing' | 'saved' | 'error'; subName?: string; error?: string }[]>([]);
+  const [queueBusy, setQueueBusy] = useState(false);
 
   useEffect(() => {
     getSubscriptions()
@@ -190,6 +209,7 @@ export default function Subscriptions() {
   const stats = useMemo(() => {
     const active = subs.filter(s => s.status === 'active');
     const monthlyINR = subs.reduce((sum, s) => sum + toMonthlyINR(s), 0);
+    const monthlyUSD = subs.reduce((sum, s) => sum + toMonthlyUSD(s), 0);
     const now = new Date();
     const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
     const thisMonthEnd   = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().slice(0, 10);
@@ -199,7 +219,7 @@ export default function Subscriptions() {
       s.next_renewal_date <= thisMonthEnd &&
       s.status !== 'cancelled',
     ).length;
-    return { monthly: monthlyINR, annual: monthlyINR * 12, active: active.length, renewing };
+    return { monthly: monthlyINR, annual: monthlyINR * 12, monthlyUSD, annualUSD: monthlyUSD * 12, active: active.length, renewing };
   }, [subs]);
 
   const filtered = useMemo(() =>
@@ -293,45 +313,7 @@ export default function Subscriptions() {
       setShowForm(false);
       setEditingSub(null);
 
-      // If created from a dropped file, auto-create the first invoice
-      if (pendingNewSubData && pendingFile && !editingSub) {
-        const ext = pendingNewSubData;
-        const subtotal = ext.subtotal ?? 0;
-        const taxAmt2 = ext.tax_amount ?? 0;
-        const computedTaxRate = subtotal > 0 ? parseFloat(((taxAmt2 / subtotal) * 100).toFixed(2)) : 0;
-        const baseAmount = subtotal > 0 ? subtotal : Math.max(0, (ext.total_amount ?? 0) - taxAmt2);
-        const extractedCurrency = ext.currency ?? saved.currency;
-        const exchangeRate = extractedCurrency === 'INR' ? 1 : saved.exchange_rate;
-        const totalAmt = baseAmount + (baseAmount * computedTaxRate / 100);
-        const inrAmt = totalAmt * exchangeRate;
-        try {
-          const invPayload: Partial<SubscriptionInvoice> = {
-            subscription_id: saved.id,
-            invoice_number: ext.invoice_number || undefined,
-            invoice_date: ext.invoice_date || undefined,
-            billing_period_from: ext.billing_period_from || undefined,
-            billing_period_to: ext.billing_period_to || undefined,
-            currency: extractedCurrency,
-            amount: baseAmount,
-            tax_amount: taxAmt2,
-            total_amount: ext.total_amount ?? totalAmt,
-            exchange_rate: exchangeRate,
-            inr_amount: inrAmt,
-            file_name: pendingFile.name,
-          };
-          const savedInv = await saveSubscriptionInvoice(invPayload);
-          try {
-            const url = await uploadSubscriptionInvoiceFile(pendingFile, savedInv.id);
-            if (url) await saveSubscriptionInvoice({ id: savedInv.id, file_url: url });
-          } catch { console.error('File upload failed for auto-created invoice'); }
-          setInvoicesMap(prev => ({ ...prev, [saved.id]: [savedInv] }));
-          setExpandedId(saved.id);
-        } catch (invErr) {
-          console.error('Failed to auto-create first invoice:', invErr);
-        }
-        setPendingFile(null);
-        setPendingNewSubData(null);
-      }
+      // No auto-create here; multi-file drops now handle this automatically
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Failed to save');
     } finally {
@@ -427,97 +409,121 @@ export default function Subscriptions() {
     setDeletingInvId(null);
   }
 
-  // ── Top-level drop zone handler ──
+  // ── Top-level drop zone handler (multi-file, auto-save) ──
   const onTopLevelDrop = useCallback(async (acceptedFiles: File[]) => {
     if (acceptedFiles.length === 0) return;
-    const file = acceptedFiles[0];
-    setDropProcessing(true);
-    setDropCurrentFile(file.name);
-    setDropResult(null);
+    setQueueBusy(true);
+    setQueueItems(acceptedFiles.map(f => ({ fileName: f.name, status: 'pending' as const })));
 
-    try {
-      const extracted = await extractInvoiceData(file);
-      const vendorName = extracted.vendor_name || '';
-      const matched = fuzzyMatchSubscription(vendorName, subs);
+    for (let i = 0; i < acceptedFiles.length; i++) {
+      const file = acceptedFiles[i];
+      setQueueItems(prev => prev.map((item, idx) => idx === i ? { ...item, status: 'processing' } : item));
 
-      if (matched) {
-        // ── Match found: expand subscription, pre-fill invoice form ──
-        setExpandedId(matched.id);
-        if (!invoicesMap[matched.id]) {
-          setLoadingInvoices(prev => new Set(prev).add(matched.id));
-          try {
-            const invs = await getSubscriptionInvoices(matched.id);
-            setInvoicesMap(prev => ({ ...prev, [matched.id]: invs }));
-          } finally {
-            setLoadingInvoices(prev => { const s = new Set(prev); s.delete(matched.id); return s; });
-          }
-        }
-        const subtotal = extracted.subtotal ?? 0;
-        const taxAmt = extracted.tax_amount ?? 0;
-        const computedTaxRate = subtotal > 0 ? parseFloat(((taxAmt / subtotal) * 100).toFixed(2)) : 0;
-        const baseAmount = subtotal > 0 ? subtotal : Math.max(0, (extracted.total_amount ?? 0) - taxAmt);
-        const extractedCurrency = extracted.currency ?? matched.currency ?? 'USD';
-        const rate = extractedCurrency === 'INR' ? '1' : String(matched.exchange_rate ?? 87);
-        setInvForm({
-          invoice_number: extracted.invoice_number ?? '',
-          invoice_date: extracted.invoice_date ?? '',
-          billing_period_from: extracted.billing_period_from ?? '',
-          billing_period_to: extracted.billing_period_to ?? '',
-          currency: extractedCurrency,
-          amount: String(baseAmount),
-          tax_rate: String(computedTaxRate),
-          exchange_rate: rate,
-          notes: '',
-        });
-        setShowInvoiceForm(matched.id);
-        setPendingFile(file);
-        setDropResult({ fileName: file.name, status: 'matched', vendorName, matchedSubName: matched.vendor_name });
-      } else {
-        // ── No match: open Add Subscription form pre-filled ──
-        const subtotal = extracted.subtotal ?? 0;
-        const taxAmt = extracted.tax_amount ?? 0;
-        const computedTaxRate = subtotal > 0 ? parseFloat(((taxAmt / subtotal) * 100).toFixed(2)) : 0;
-        const baseAmount = subtotal > 0 ? subtotal : Math.max(0, (extracted.total_amount ?? 0) - taxAmt);
+      try {
+        const extracted = await extractInvoiceData(file);
+        const vendorName = extracted.vendor_name || 'Unknown Vendor';
+        const matched = fuzzyMatchSubscription(vendorName, subs);
+
         const extractedCurrency = extracted.currency ?? 'USD';
-        const rate = extractedCurrency === 'INR' ? '1' : '87';
-        setEditingSub(null);
-        setForm({
-          vendor_name: vendorName,
-          service_name: vendorName,
-          plan_name: '',
-          billing_cycle: 'monthly',
-          currency: extractedCurrency,
-          amount: String(baseAmount),
-          tax_rate: String(computedTaxRate),
-          exchange_rate: rate,
-          account_email: '',
-          category: extracted.category ?? '',
-          status: 'active',
-          start_date: extracted.invoice_date ?? '',
-          next_renewal_date: '',
-          notes: '',
-        });
-        setShowForm(true);
-        setPendingFile(file);
-        setPendingNewSubData(extracted);
-        setDropResult({ fileName: file.name, status: 'new', vendorName });
+        const subtotal = extracted.subtotal ?? 0;
+        const taxAmt = extracted.tax_amount ?? 0;
+        const baseAmount = subtotal > 0 ? subtotal : Math.max(0, (extracted.total_amount ?? 0) - taxAmt);
+        const extractedTotal = extracted.total_amount ?? (baseAmount + taxAmt);
+
+        if (matched) {
+          // ── Auto-save invoice to existing subscription ──
+          const exchangeRate = extractedCurrency === 'INR' ? 1 : (matched.exchange_rate ?? 87);
+          const inrAmt = extractedTotal * exchangeRate;
+          const invPayload: Partial<SubscriptionInvoice> = {
+            subscription_id: matched.id,
+            invoice_number: extracted.invoice_number || undefined,
+            invoice_date: extracted.invoice_date || undefined,
+            billing_period_from: extracted.billing_period_from || undefined,
+            billing_period_to: extracted.billing_period_to || undefined,
+            currency: extractedCurrency,
+            amount: baseAmount,
+            tax_amount: taxAmt,
+            total_amount: extractedTotal,
+            exchange_rate: exchangeRate,
+            inr_amount: inrAmt,
+            file_name: file.name,
+          };
+          const savedInv = await saveSubscriptionInvoice(invPayload);
+          try {
+            const url = await uploadSubscriptionInvoiceFile(file, savedInv.id);
+            if (url) {
+              await saveSubscriptionInvoice({ id: savedInv.id, file_url: url });
+              savedInv.file_url = url;
+            }
+          } catch { /* upload non-fatal */ }
+          setInvoicesMap(prev => ({ ...prev, [matched.id]: [savedInv, ...(prev[matched.id] || [])] }));
+          setQueueItems(prev => prev.map((item, idx) => idx === i
+            ? { ...item, status: 'saved', subName: matched.vendor_name }
+            : item,
+          ));
+        } else {
+          // ── Auto-create new subscription + first invoice ──
+          const exchangeRate = extractedCurrency === 'INR' ? 1 : 87;
+          const inrAmt = extractedTotal * exchangeRate;
+          const computedTaxRate = subtotal > 0 ? parseFloat(((taxAmt / subtotal) * 100).toFixed(2)) : 0;
+          const subPayload: Partial<Subscription> = {
+            vendor_name: vendorName,
+            service_name: vendorName,
+            billing_cycle: 'monthly',
+            currency: extractedCurrency,
+            amount: baseAmount,
+            tax_rate: computedTaxRate,
+            tax_amount: taxAmt,
+            total_amount: extractedTotal,
+            exchange_rate: exchangeRate,
+            inr_amount: inrAmt,
+            status: 'active',
+            start_date: extracted.invoice_date || undefined,
+          };
+          const savedSub = await saveSubscription(subPayload);
+          setSubs(prev => [savedSub, ...prev]);
+          const invPayload: Partial<SubscriptionInvoice> = {
+            subscription_id: savedSub.id,
+            invoice_number: extracted.invoice_number || undefined,
+            invoice_date: extracted.invoice_date || undefined,
+            billing_period_from: extracted.billing_period_from || undefined,
+            billing_period_to: extracted.billing_period_to || undefined,
+            currency: extractedCurrency,
+            amount: baseAmount,
+            tax_amount: taxAmt,
+            total_amount: extractedTotal,
+            exchange_rate: exchangeRate,
+            inr_amount: inrAmt,
+            file_name: file.name,
+          };
+          const savedInv = await saveSubscriptionInvoice(invPayload);
+          try {
+            const url = await uploadSubscriptionInvoiceFile(file, savedInv.id);
+            if (url) {
+              await saveSubscriptionInvoice({ id: savedInv.id, file_url: url });
+              savedInv.file_url = url;
+            }
+          } catch { /* upload non-fatal */ }
+          setInvoicesMap(prev => ({ ...prev, [savedSub.id]: [savedInv] }));
+          setQueueItems(prev => prev.map((item, idx) => idx === i
+            ? { ...item, status: 'saved', subName: `New: ${vendorName}` }
+            : item,
+          ));
+        }
+      } catch (err) {
+        setQueueItems(prev => prev.map((item, idx) => idx === i
+          ? { ...item, status: 'error', error: err instanceof Error ? err.message : 'Failed' }
+          : item,
+        ));
       }
-    } catch (err) {
-      setDropResult({
-        fileName: file.name,
-        status: 'error',
-        error: err instanceof Error ? err.message : 'Extraction failed',
-      });
-    } finally {
-      setDropCurrentFile(null);
-      setDropProcessing(false);
     }
-  }, [subs, invoicesMap]);
+    setQueueBusy(false);
+  }, [subs]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop: onTopLevelDrop,
     accept: { 'application/pdf': ['.pdf'], 'image/*': ['.jpg', '.jpeg', '.png'] },
-    disabled: dropProcessing,
+    disabled: queueBusy,
     noClick: false,
   });
 
@@ -533,15 +539,32 @@ export default function Subscriptions() {
       <SubscriptionTabBar />
 
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
+      <div className="flex items-center justify-between gap-4">
+        <div className="shrink-0">
           <h1 className="text-2xl font-bold text-slate-900">Subscription Manager</h1>
           <p className="text-sm text-slate-500 mt-0.5">Track recurring SaaS spend, renewals, and invoice history</p>
+        </div>
+        {/* USD / INR toggle */}
+        <div className="flex items-center bg-white border border-slate-200 rounded-lg overflow-hidden text-xs font-medium shadow-sm">
+          <button
+            type="button"
+            onClick={() => setViewCurrency('USD')}
+            className={`flex items-center gap-1.5 px-3 py-2 transition-colors ${viewCurrency === 'USD' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            <DollarSign size={11} /> USD
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewCurrency('INR')}
+            className={`flex items-center gap-1.5 px-3 py-2 transition-colors ${viewCurrency === 'INR' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            <IndianRupee size={11} /> INR
+          </button>
         </div>
         <button
           type="button"
           onClick={openAddForm}
-          className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors"
+          className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors shrink-0"
         >
           <Plus size={15} />
           Add Subscription
@@ -551,8 +574,8 @@ export default function Subscriptions() {
       {/* Stats row */}
       <div className="grid grid-cols-4 gap-4">
         {[
-          { label: 'Monthly Spend',   value: fmtINR(stats.monthly), sub: 'Active subscriptions',   Icon: IndianRupee, bg: 'bg-indigo-50',  tc: 'text-indigo-600' },
-          { label: 'Annual Spend',    value: fmtINR(stats.annual),  sub: 'Projected (12 months)',   Icon: RefreshCw,   bg: 'bg-emerald-50', tc: 'text-emerald-600'},
+          { label: 'Monthly Spend',   value: viewCurrency === 'USD' ? fmtUSD(stats.monthlyUSD) : fmtINR(stats.monthly), sub: 'Active subscriptions',   Icon: viewCurrency === 'USD' ? DollarSign : IndianRupee, bg: 'bg-indigo-50',  tc: 'text-indigo-600' },
+          { label: 'Annual Spend',    value: viewCurrency === 'USD' ? fmtUSD(stats.annualUSD)  : fmtINR(stats.annual),  sub: 'Projected (12 months)',   Icon: RefreshCw,   bg: 'bg-emerald-50', tc: 'text-emerald-600'},
           { label: 'Active',          value: String(stats.active),  sub: 'Active subscriptions',    Icon: Check,       bg: 'bg-slate-50',   tc: 'text-slate-600'  },
           { label: 'Renewing',        value: String(stats.renewing),sub: 'This calendar month',     Icon: Calendar,    bg: 'bg-amber-50',   tc: 'text-amber-600'  },
         ].map(({ label, value, sub, Icon, bg, tc }) => (
@@ -588,29 +611,29 @@ export default function Subscriptions() {
             )}
           </div>
           <div className="flex-1 min-w-0">
-            {dropProcessing ? (
+            {queueBusy ? (
               <>
                 <p className="text-sm font-semibold text-indigo-700">
-                  Extracting from {dropCurrentFile}...
+                  Processing {queueItems.filter(q => q.status === 'saved' || q.status === 'error').length} of {queueItems.length} invoice{queueItems.length !== 1 ? 's' : ''}…
                 </p>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  AI is reading your invoice. This usually takes a few seconds.
+                <p className="text-xs text-slate-500 mt-0.5 truncate">
+                  {queueItems.find(q => q.status === 'processing')?.fileName ?? ''}
                 </p>
               </>
             ) : (
               <>
                 <p className="text-sm font-semibold text-slate-700">
                   {isDragActive
-                    ? 'Drop your subscription invoice here'
-                    : 'Drop subscription invoices here, or click to browse'}
+                    ? 'Drop invoices here — all will be saved automatically'
+                    : 'Drop multiple invoices here, or click to browse'}
                 </p>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  PDF, JPG, PNG — AI will extract data and match to existing subscriptions automatically
+                  PDF, JPG, PNG — AI extracts and auto-saves each invoice to its subscription
                 </p>
               </>
             )}
           </div>
-          {!dropProcessing && (
+          {!queueBusy && (
             <div className="flex items-center gap-1.5 text-xs text-indigo-600 font-medium bg-indigo-50 px-3 py-1.5 rounded-lg border border-indigo-200 flex-shrink-0">
               <Sparkles size={12} />
               AI-Powered
@@ -619,52 +642,32 @@ export default function Subscriptions() {
         </div>
       </div>
 
-      {/* Drop result banner */}
-      {dropResult && !dropProcessing && (
-        <div className={`flex items-center gap-2 rounded-lg px-4 py-2.5 text-xs ${
-          dropResult.status === 'matched' ? 'bg-green-50 border border-green-200' :
-          dropResult.status === 'new' ? 'bg-amber-50 border border-amber-200' :
-          'bg-red-50 border border-red-200'
-        }`}>
-          {dropResult.status === 'matched' && (
-            <>
-              <CheckCircle size={14} className="text-green-500 flex-shrink-0" />
-              <span className="text-slate-700">
-                <span className="font-medium">{dropResult.fileName}</span>
-                {' — matched to '}
-                <span className="font-semibold text-indigo-600">{dropResult.matchedSubName}</span>
-                . Review and save the invoice below.
-              </span>
-            </>
-          )}
-          {dropResult.status === 'new' && (
-            <>
-              <Plus size={14} className="text-amber-500 flex-shrink-0" />
-              <span className="text-slate-700">
-                <span className="font-medium">{dropResult.fileName}</span>
-                {' — new vendor: '}
-                <span className="font-semibold text-amber-600">{dropResult.vendorName}</span>
-                . Fill in subscription details and save.
-              </span>
-            </>
-          )}
-          {dropResult.status === 'error' && (
-            <>
-              <AlertCircle size={14} className="text-red-500 flex-shrink-0" />
-              <span className="text-red-600">
-                <span className="font-medium">{dropResult.fileName}</span>
-                {' — '}{dropResult.error}
-              </span>
-            </>
-          )}
-          <button
-            type="button"
-            title="Dismiss"
-            onClick={() => setDropResult(null)}
-            className="ml-auto text-slate-400 hover:text-slate-600 flex-shrink-0"
-          >
-            <X size={14} />
-          </button>
+      {/* Queue results panel */}
+      {queueItems.length > 0 && (
+        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-2.5 bg-slate-50 border-b border-slate-100">
+            <p className="text-xs font-semibold text-slate-600 uppercase tracking-wide">
+              {queueBusy ? 'Processing…' : 'Results'} · {queueItems.length} file{queueItems.length !== 1 ? 's' : ''}
+            </p>
+            {!queueBusy && (
+              <button type="button" onClick={() => setQueueItems([])} className="text-slate-400 hover:text-slate-600">
+                <X size={14} />
+              </button>
+            )}
+          </div>
+          <div className="divide-y divide-slate-100">
+            {queueItems.map((item, i) => (
+              <div key={i} className="flex items-center gap-3 px-4 py-2.5 text-xs">
+                {item.status === 'pending'    && <div className="w-3.5 h-3.5 rounded-full border-2 border-slate-200 shrink-0" />}
+                {item.status === 'processing' && <Loader2 size={14} className="text-indigo-500 animate-spin shrink-0" />}
+                {item.status === 'saved'      && <CheckCircle size={14} className="text-emerald-500 shrink-0" />}
+                {item.status === 'error'      && <AlertCircle size={14} className="text-red-500 shrink-0" />}
+                <span className="text-slate-600 flex-1 truncate">{item.fileName}</span>
+                {item.status === 'saved' && <span className="text-emerald-600 font-medium shrink-0">{item.subName}</span>}
+                {item.status === 'error' && <span className="text-red-500 shrink-0">{item.error}</span>}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -899,7 +902,7 @@ export default function Subscriptions() {
               <span>Vendor / Account</span>
               <span>Service</span>
               <span>Cycle</span>
-              <span>INR / mo</span>
+              <span>{viewCurrency} / mo</span>
               <span>Renews</span>
               <span>Status</span>
               <span className="w-20" />
@@ -929,7 +932,7 @@ export default function Subscriptions() {
                       {sub.billing_cycle}
                     </span>
                     <p className="text-sm font-semibold text-slate-800 tabular-nums">
-                      {fmtINR(toMonthlyINR(sub))}
+                      {viewCurrency === 'USD' ? fmtUSD(toMonthlyUSD(sub)) : fmtINR(toMonthlyINR(sub))}
                     </p>
                     <p className={`text-xs font-medium ${
                       ri.urgency === 'overdue' ? 'text-red-600' :
@@ -1006,8 +1009,8 @@ export default function Subscriptions() {
                               <span>Invoice #</span>
                               <span>Date</span>
                               <span>Period</span>
-                              <span>Amount</span>
-                              <span>INR</span>
+                              <span>Original</span>
+                              <span>{viewCurrency}</span>
                               <span />
                             </div>
                           )}
@@ -1020,9 +1023,21 @@ export default function Subscriptions() {
                                   ? `${fmtDate(inv.billing_period_from)} – ${fmtDate(inv.billing_period_to)}`
                                   : '—'}
                               </span>
-                              <span className="text-slate-600 tabular-nums">{fmtCur(inv.total_amount, inv.currency)}</span>
-                              <span className="text-slate-800 font-semibold tabular-nums">{fmtINR(inv.inr_amount)}</span>
+                              <span className="text-slate-500 tabular-nums">{fmtCur(inv.total_amount, inv.currency)}</span>
+                              <span className="text-slate-800 font-semibold tabular-nums">
+                                {viewCurrency === 'USD' ? fmtUSD(invToUSD(inv)) : fmtINR(inv.inr_amount)}
+                              </span>
                               <div className="flex items-center gap-1">
+                                {inv.file_url && (
+                                  <button
+                                    type="button"
+                                    title="View invoice"
+                                    onClick={() => setViewingFile({ url: inv.file_url!, name: inv.file_name || inv.invoice_number || 'Invoice' })}
+                                    className="w-5 h-5 flex items-center justify-center rounded hover:bg-indigo-50 text-slate-400 hover:text-indigo-600"
+                                  >
+                                    <Eye size={12} />
+                                  </button>
+                                )}
                                 {deletingInvId === inv.id ? (
                                   <>
                                     <button
@@ -1194,6 +1209,58 @@ export default function Subscriptions() {
           </div>
         )}
       </div>
+
+      {/* ── File viewer modal ── */}
+      {viewingFile && (
+        <div
+          className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
+          onClick={() => setViewingFile(null)}
+        >
+          <div
+            className="bg-white rounded-2xl overflow-hidden shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 shrink-0">
+              <p className="text-sm font-semibold text-slate-800 truncate flex-1 mr-4">{viewingFile.name}</p>
+              <div className="flex items-center gap-3">
+                <a
+                  href={viewingFile.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 text-xs text-indigo-600 hover:text-indigo-700 font-medium whitespace-nowrap"
+                >
+                  <ExternalLink size={13} /> Open in new tab
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setViewingFile(null)}
+                  className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-hidden min-h-0">
+              {/\.(pdf)$/i.test(viewingFile.url) || viewingFile.url.includes('pdf') ? (
+                <iframe
+                  src={viewingFile.url}
+                  className="w-full h-full"
+                  style={{ minHeight: '70vh' }}
+                  title={viewingFile.name}
+                />
+              ) : (
+                <div className="flex items-center justify-center h-full p-4 bg-slate-50" style={{ minHeight: '50vh' }}>
+                  <img
+                    src={viewingFile.url}
+                    alt={viewingFile.name}
+                    className="max-w-full max-h-full object-contain rounded-lg"
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
