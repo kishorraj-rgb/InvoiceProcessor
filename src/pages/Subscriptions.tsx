@@ -19,6 +19,7 @@ import {
   Eye,
   ExternalLink,
   DollarSign,
+  ArrowRightLeft,
 } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
 import {
@@ -208,6 +209,9 @@ export default function Subscriptions() {
   // Delete confirms
   const [deletingSubId, setDeletingSubId] = useState<string | null>(null);
   const [deletingInvId, setDeletingInvId] = useState<string | null>(null);
+  // Reassign invoice to different subscription
+  const [reassigningInvId, setReassigningInvId] = useState<string | null>(null);
+  const [reassignTargetSubId, setReassignTargetSubId] = useState<string>('');
 
   // Currency display toggle
   const [viewCurrency, setViewCurrency] = useState<'USD' | 'INR'>('USD');
@@ -426,6 +430,24 @@ export default function Subscriptions() {
       alert(err instanceof Error ? err.message : 'Failed to delete');
     }
     setDeletingInvId(null);
+  }
+
+  async function handleReassignInvoice(invId: string, fromSubId: string, toSubId: string) {
+    if (!toSubId || toSubId === fromSubId) { setReassigningInvId(null); return; }
+    try {
+      await saveSubscriptionInvoice({ id: invId, subscription_id: toSubId });
+      // Move in-memory: remove from old sub, append to new sub (will re-fetch on next expand)
+      setInvoicesMap(prev => {
+        const inv = (prev[fromSubId] || []).find(i => i.id === invId);
+        const fromList = (prev[fromSubId] || []).filter(i => i.id !== invId);
+        const toList = inv ? [inv, ...(prev[toSubId] || [])] : (prev[toSubId] || []);
+        return { ...prev, [fromSubId]: fromList, [toSubId]: toList };
+      });
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to reassign');
+    }
+    setReassigningInvId(null);
+    setReassignTargetSubId('');
   }
 
   // ── Top-level drop zone handler (multi-file, auto-save) ──
@@ -1062,6 +1084,48 @@ export default function Subscriptions() {
                                     <Eye size={12} />
                                   </button>
                                 )}
+                                {reassigningInvId === inv.id ? (
+                                  <div className="flex items-center gap-1">
+                                    <select
+                                      title="Move to subscription"
+                                      value={reassignTargetSubId}
+                                      onChange={e => setReassignTargetSubId(e.target.value)}
+                                      className="text-xs border border-indigo-300 rounded px-1.5 py-0.5 focus:outline-none focus:ring-1 focus:ring-indigo-400 max-w-[160px]"
+                                    >
+                                      <option value="">— pick subscription —</option>
+                                      {subs.filter(s => s.id !== sub.id).map(s => (
+                                        <option key={s.id} value={s.id}>
+                                          {s.vendor_name}{s.account_email ? ` (${s.account_email})` : ''}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <button
+                                      type="button"
+                                      title="Confirm move"
+                                      onClick={() => handleReassignInvoice(inv.id, sub.id, reassignTargetSubId)}
+                                      className="w-5 h-5 flex items-center justify-center rounded bg-indigo-100 hover:bg-indigo-200 text-indigo-600"
+                                    >
+                                      <Check size={10} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      title="Cancel"
+                                      onClick={() => { setReassigningInvId(null); setReassignTargetSubId(''); }}
+                                      className="w-5 h-5 flex items-center justify-center rounded hover:bg-slate-200 text-slate-500"
+                                    >
+                                      <X size={10} />
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    title="Move to different subscription"
+                                    onClick={() => { setReassigningInvId(inv.id); setReassignTargetSubId(''); setDeletingInvId(null); }}
+                                    className="w-5 h-5 flex items-center justify-center rounded hover:bg-amber-50 text-slate-400 hover:text-amber-600"
+                                  >
+                                    <ArrowRightLeft size={11} />
+                                  </button>
+                                )}
                                 {deletingInvId === inv.id ? (
                                   <>
                                     <button
@@ -1085,7 +1149,7 @@ export default function Subscriptions() {
                                   <button
                                     type="button"
                                     title="Delete invoice"
-                                    onClick={() => setDeletingInvId(inv.id)}
+                                    onClick={() => { setDeletingInvId(inv.id); setReassigningInvId(null); }}
                                     className="w-6 h-6 flex items-center justify-center rounded hover:bg-red-50 text-slate-400 hover:text-red-500"
                                   >
                                     <Trash2 size={12} />
