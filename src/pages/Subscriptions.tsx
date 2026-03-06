@@ -252,14 +252,12 @@ export default function Subscriptions() {
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [queueItems, setQueueItems] = useState<{
     fileName: string;
-    status: 'pending' | 'processing' | 'saved' | 'error' | 'needs_account' | 'needs_subscription';
+    status: 'pending' | 'processing' | 'saved' | 'error' | 'needs_account';
     subName?: string;
     error?: string;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     deferred?: { extracted: any; file: File; vendorName: string };
     selectedAccount?: string;
-    matchedSubs?: Subscription[];
-    selectedSubId?: string;
   }[]>([]);
   const [queueBusy, setQueueBusy] = useState(false);
 
@@ -542,72 +540,56 @@ export default function Subscriptions() {
         const buyerEmail = extracted.buyer_email || null;
         const allMatches = fuzzyMatchAll(vendorName, liveSubs);
 
-        // Multiple subscriptions match this vendor → ask user to pick
-        if (allMatches.length > 1) {
+        // Dedup: check ALL matching subscriptions for duplicate invoice_number
+        const extractedInvNum = extracted.invoice_number?.trim();
+        if (extractedInvNum && allMatches.length > 0) {
+          let isDup = false;
+          for (const m of allMatches) {
+            let existingInvs = invoicesMap[m.id];
+            if (!existingInvs) {
+              try {
+                existingInvs = await getSubscriptionInvoices(m.id);
+                setInvoicesMap(prev => ({ ...prev, [m.id]: existingInvs! }));
+              } catch { existingInvs = []; }
+            }
+            if (existingInvs.some(inv => inv.invoice_number === extractedInvNum)) {
+              isDup = true;
+              break;
+            }
+          }
+          if (isDup) {
+            setQueueItems(prev => prev.map((item, idx) => idx === i
+              ? { ...item, status: 'saved', subName: `${vendorName} (duplicate skipped)` }
+              : item,
+            ));
+            continue;
+          }
+        }
+
+        // No billing accounts configured → block
+        if (billingAccounts.length === 0) {
           setQueueItems(prev => prev.map((item, idx) => idx === i
-            ? { ...item, status: 'needs_subscription' as const, subName: vendorName, deferred: { extracted, file, vendorName }, matchedSubs: allMatches, selectedSubId: allMatches[0].id }
+            ? { ...item, status: 'error' as const, error: 'No billing accounts configured — add one in Settings first' }
             : item,
           ));
           continue;
         }
 
+        // Always ask user to pick a billing account
+        // Pre-select: buyer email from invoice > matched subscription's account > first account
         const matched = allMatches.length === 1 ? allMatches[0] : fuzzyMatchSubscription(vendorName, liveSubs, buyerEmail);
-
-        if (matched) {
-          // ── Existing subscription matched ──
-          // Dedup: fetch invoices from DB if not already loaded, then check for duplicate invoice_number
-          let existingInvs = invoicesMap[matched.id];
-          if (!existingInvs) {
-            try {
-              existingInvs = await getSubscriptionInvoices(matched.id);
-              setInvoicesMap(prev => ({ ...prev, [matched.id]: existingInvs! }));
-            } catch { existingInvs = []; }
-          }
-          const extractedInvNum = extracted.invoice_number?.trim();
-          if (extractedInvNum && existingInvs.some(inv => inv.invoice_number === extractedInvNum)) {
-            setQueueItems(prev => prev.map((item, idx) => idx === i
-              ? { ...item, status: 'saved', subName: `${matched.vendor_name} (duplicate skipped)` }
-              : item,
-            ));
-            continue;
-          }
-          // Always ask user to confirm account before saving
-          if (billingAccounts.length === 0) {
-            setQueueItems(prev => prev.map((item, idx) => idx === i
-              ? { ...item, status: 'error' as const, error: 'No billing accounts configured — add one in Settings first' }
-              : item,
-            ));
-            continue;
-          }
-          const matchedAccount = matched.account_email?.toLowerCase().trim();
-          const preselect = matchedAccount && billingAccounts.some(a => a.email.toLowerCase() === matchedAccount)
-            ? matched.account_email!
-            : billingAccounts[0]?.email;
-          setQueueItems(prev => prev.map((item, idx) => idx === i
-            ? { ...item, status: 'needs_account' as const, subName: matched.vendor_name, deferred: { extracted, file, vendorName }, selectedAccount: preselect }
-            : item,
-          ));
-          continue;
-        } else {
-          // ── Auto-create new subscription + first invoice ──
-          // No billing accounts configured → block
-          if (billingAccounts.length === 0) {
-            setQueueItems(prev => prev.map((item, idx) => idx === i
-              ? { ...item, status: 'error' as const, error: 'No billing accounts configured — add one in Settings first' }
-              : item,
-            ));
-            continue;
-          }
-          // Always ask user to pick an account; pre-select extracted buyer email if it matches a known account
-          const preselect = (buyerEmail && billingAccounts.some(a => a.email.toLowerCase() === buyerEmail.toLowerCase()))
-            ? buyerEmail
-            : billingAccounts[0]?.email;
-          setQueueItems(prev => prev.map((item, idx) => idx === i
-            ? { ...item, status: 'needs_account' as const, subName: vendorName, deferred: { extracted, file, vendorName }, selectedAccount: preselect }
-            : item,
-          ));
-          continue;
+        let preselect = billingAccounts[0]?.email;
+        if (buyerEmail && billingAccounts.some(a => a.email.toLowerCase() === buyerEmail.toLowerCase())) {
+          preselect = buyerEmail;
+        } else if (matched?.account_email && billingAccounts.some(a => a.email.toLowerCase() === matched.account_email!.toLowerCase())) {
+          preselect = matched.account_email!;
         }
+
+        setQueueItems(prev => prev.map((item, idx) => idx === i
+          ? { ...item, status: 'needs_account' as const, subName: vendorName, deferred: { extracted, file, vendorName }, selectedAccount: preselect }
+          : item,
+        ));
+        continue;
       } catch (err) {
         setQueueItems(prev => prev.map((item, idx) => idx === i
           ? { ...item, status: 'error', error: err instanceof Error ? err.message : 'Failed' }
@@ -700,40 +682,6 @@ export default function Subscriptions() {
     }
   }
 
-  // Save a deferred queue item after user picks a specific subscription
-  async function saveDeferredToSubscription(idx: number) {
-    const item = queueItems[idx];
-    if (!item?.deferred || !item.selectedSubId) return;
-    const { extracted, file } = item.deferred;
-    const targetSub = subs.find(s => s.id === item.selectedSubId);
-    if (!targetSub) return;
-    setQueueItems(prev => prev.map((q, i) => i === idx ? { ...q, status: 'processing' as const } : q));
-    try {
-      const extractedCurrency = extracted.currency ?? 'USD';
-      const subtotal = extracted.subtotal ?? 0;
-      const taxAmt = extracted.tax_amount ?? 0;
-      const baseAmount = subtotal > 0 ? subtotal : Math.max(0, (extracted.total_amount ?? 0) - taxAmt);
-      const extractedTotal = extracted.total_amount ?? (baseAmount + taxAmt);
-      const exchangeRate = extractedCurrency === 'INR' ? 1 : (targetSub.exchange_rate ?? 87);
-      const inrAmt = extractedTotal * exchangeRate;
-      const savedInv = await saveSubscriptionInvoice({
-        subscription_id: targetSub.id,
-        invoice_number: extracted.invoice_number || undefined,
-        invoice_date: extracted.invoice_date || undefined,
-        billing_period_from: extracted.billing_period_from || undefined,
-        billing_period_to: extracted.billing_period_to || undefined,
-        currency: extractedCurrency, amount: baseAmount, tax_amount: taxAmt,
-        total_amount: extractedTotal, exchange_rate: exchangeRate, inr_amount: inrAmt,
-        file_name: file.name,
-      });
-      try { const url = await uploadSubscriptionInvoiceFile(file, savedInv.id); if (url) { await saveSubscriptionInvoice({ id: savedInv.id, file_url: url }); savedInv.file_url = url; } } catch {}
-      setInvoicesMap(prev => ({ ...prev, [targetSub.id]: [savedInv, ...(prev[targetSub.id] || [])] }));
-      setExpandedId(targetSub.id);
-      setQueueItems(prev => prev.map((q, i) => i === idx ? { ...q, status: 'saved' as const, subName: `${targetSub.vendor_name} (${targetSub.account_email || 'no account'})`, deferred: undefined } : q));
-    } catch (err) {
-      setQueueItems(prev => prev.map((q, i) => i === idx ? { ...q, status: 'error' as const, error: err instanceof Error ? err.message : 'Failed', deferred: undefined } : q));
-    }
-  }
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop: onTopLevelDrop,
@@ -878,7 +826,6 @@ export default function Subscriptions() {
                 {item.status === 'saved'               && <CheckCircle size={14} className="text-emerald-500 shrink-0" />}
                 {item.status === 'error'               && <AlertCircle size={14} className="text-red-500 shrink-0" />}
                 {item.status === 'needs_account'       && <AlertCircle size={14} className="text-amber-500 shrink-0" />}
-                {item.status === 'needs_subscription'  && <AlertCircle size={14} className="text-indigo-500 shrink-0" />}
                 <span className="text-slate-600 flex-1 truncate">{item.fileName}</span>
                 {item.status === 'saved' && <span className="text-emerald-600 font-medium shrink-0">{item.subName}</span>}
                 {item.status === 'error' && <span className="text-red-500 shrink-0">{item.error}</span>}
@@ -899,30 +846,6 @@ export default function Subscriptions() {
                       onClick={() => saveDeferredItem(i)}
                       className="w-5 h-5 flex items-center justify-center rounded bg-amber-100 hover:bg-amber-200 text-amber-700"
                       title="Save with selected account"
-                    >
-                      <Check size={10} />
-                    </button>
-                  </div>
-                )}
-                {item.status === 'needs_subscription' && (
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <span className="text-indigo-600 font-medium text-[11px]">Which account?</span>
-                    <select
-                      value={item.selectedSubId || ''}
-                      onChange={e => setQueueItems(prev => prev.map((q, j) => j === i ? { ...q, selectedSubId: e.target.value } : q))}
-                      className="text-[11px] border border-indigo-300 rounded px-1.5 py-0.5 focus:outline-none focus:ring-1 focus:ring-indigo-400 max-w-[220px]"
-                    >
-                      {(item.matchedSubs || []).map(s => (
-                        <option key={s.id} value={s.id}>
-                          {s.vendor_name}{s.account_email ? ` · ${s.account_email}` : ''}
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      onClick={() => saveDeferredToSubscription(i)}
-                      className="w-5 h-5 flex items-center justify-center rounded bg-indigo-100 hover:bg-indigo-200 text-indigo-700"
-                      title="Save to selected subscription"
                     >
                       <Check size={10} />
                     </button>
