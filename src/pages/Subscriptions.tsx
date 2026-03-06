@@ -20,6 +20,7 @@ import {
   ExternalLink,
   DollarSign,
   ArrowRightLeft,
+  ArrowUpDown,
 } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
 import {
@@ -217,6 +218,7 @@ export default function Subscriptions() {
 
   // Currency display toggle
   const [viewCurrency, setViewCurrency] = useState<'USD' | 'INR'>('USD');
+  const [invSortAsc, setInvSortAsc] = useState(true); // true = oldest first
   // File viewer modal
   const [viewingFile, setViewingFile] = useState<{ url: string; name: string } | null>(null);
   // Top-level drop zone – multi-file queue
@@ -510,6 +512,16 @@ export default function Subscriptions() {
 
         if (matched) {
           // ── Auto-save invoice to existing subscription ──
+          // Dedup: skip if invoice_number already exists under this subscription
+          const existingInvs = invoicesMap[matched.id] || [];
+          const extractedInvNum = extracted.invoice_number?.trim();
+          if (extractedInvNum && existingInvs.some(inv => inv.invoice_number === extractedInvNum)) {
+            setQueueItems(prev => prev.map((item, idx) => idx === i
+              ? { ...item, status: 'saved', subName: `${matched.vendor_name} (duplicate skipped)` }
+              : item,
+            ));
+            continue;
+          }
           const exchangeRate = extractedCurrency === 'INR' ? 1 : (matched.exchange_rate ?? 87);
           const inrAmt = extractedTotal * exchangeRate;
           const invPayload: Partial<SubscriptionInvoice> = {
@@ -1003,7 +1015,11 @@ export default function Subscriptions() {
             {filtered.map(sub => {
               const ri = renewalInfo(sub);
               const isExpanded = expandedId === sub.id;
-              const subInvoices = invoicesMap[sub.id] || [];
+              const subInvoices = [...(invoicesMap[sub.id] || [])].sort((a, b) => {
+                const da = a.invoice_date || '';
+                const db = b.invoice_date || '';
+                return invSortAsc ? da.localeCompare(db) : db.localeCompare(da);
+              });
               const isLoadingInv = loadingInvoices.has(sub.id);
 
               return (
@@ -1099,7 +1115,14 @@ export default function Subscriptions() {
                           {subInvoices.length > 0 && (
                             <div className="grid grid-cols-[2fr_1fr_2fr_1fr_1fr_auto] gap-3 py-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wide">
                               <span>Invoice #</span>
-                              <span>Date</span>
+                              <button
+                                type="button"
+                                onClick={() => setInvSortAsc(prev => !prev)}
+                                className="flex items-center gap-1 hover:text-slate-600 transition-colors"
+                                title={invSortAsc ? 'Sorted oldest first — click to reverse' : 'Sorted newest first — click to reverse'}
+                              >
+                                Date <ArrowUpDown size={10} />
+                              </button>
                               <span>Period</span>
                               <span>Original</span>
                               <span>{viewCurrency}</span>
