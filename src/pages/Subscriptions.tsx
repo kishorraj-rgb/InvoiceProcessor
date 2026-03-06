@@ -235,7 +235,15 @@ export default function Subscriptions() {
   const [viewingFile, setViewingFile] = useState<{ url: string; name: string } | null>(null);
   // Top-level drop zone – multi-file queue
   const [pendingFile, setPendingFile] = useState<File | null>(null);
-  const [queueItems, setQueueItems] = useState<{ fileName: string; status: 'pending' | 'processing' | 'saved' | 'error'; subName?: string; error?: string }[]>([]);
+  const [queueItems, setQueueItems] = useState<{
+    fileName: string;
+    status: 'pending' | 'processing' | 'saved' | 'error' | 'needs_account';
+    subName?: string;
+    error?: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    deferred?: { extracted: any; file: File; vendorName: string };
+    selectedAccount?: string;
+  }[]>([]);
   const [queueBusy, setQueueBusy] = useState(false);
 
   // Billing accounts (localStorage)
@@ -525,8 +533,14 @@ export default function Subscriptions() {
 
         if (matched) {
           // ── Auto-save invoice to existing subscription ──
-          // Dedup: skip if invoice_number already exists under this subscription
-          const existingInvs = invoicesMap[matched.id] || [];
+          // Dedup: fetch invoices from DB if not already loaded, then check for duplicate invoice_number
+          let existingInvs = invoicesMap[matched.id];
+          if (!existingInvs) {
+            try {
+              existingInvs = await getSubscriptionInvoices(matched.id);
+              setInvoicesMap(prev => ({ ...prev, [matched.id]: existingInvs! }));
+            } catch { existingInvs = []; }
+          }
           const extractedInvNum = extracted.invoice_number?.trim();
           if (extractedInvNum && existingInvs.some(inv => inv.invoice_number === extractedInvNum)) {
             setQueueItems(prev => prev.map((item, idx) => idx === i
@@ -567,6 +581,14 @@ export default function Subscriptions() {
           ));
         } else {
           // ── Auto-create new subscription + first invoice ──
+          // If no buyer email extracted and multiple accounts exist, defer and ask user
+          if (!buyerEmail && billingAccounts.length > 1) {
+            setQueueItems(prev => prev.map((item, idx) => idx === i
+              ? { ...item, status: 'needs_account' as const, subName: vendorName, deferred: { extracted, file, vendorName }, selectedAccount: billingAccounts[0]?.email }
+              : item,
+            ));
+            continue;
+          }
           const exchangeRate = extractedCurrency === 'INR' ? 1 : 87;
           const inrAmt = extractedTotal * exchangeRate;
           const computedTaxRate = subtotal > 0 ? parseFloat(((taxAmt / subtotal) * 100).toFixed(2)) : 0;
@@ -628,6 +650,69 @@ export default function Subscriptions() {
     // Auto-expand the first subscription that received an invoice
     if (firstSavedSubId) setExpandedId(firstSavedSubId);
   }, [subs]);
+
+  // Save a deferred queue item after user picks an account
+  async function saveDeferredItem(idx: number) {
+    const item = queueItems[idx];
+    if (!item?.deferred || !item.selectedAccount) return;
+    const { extracted, file, vendorName } = item.deferred;
+    const accountEmail = item.selectedAccount;
+    setQueueItems(prev => prev.map((q, i) => i === idx ? { ...q, status: 'processing' as const } : q));
+    try {
+      const extractedCurrency = extracted.currency ?? 'USD';
+      const subtotal = extracted.subtotal ?? 0;
+      const taxAmt = extracted.tax_amount ?? 0;
+      const baseAmount = subtotal > 0 ? subtotal : Math.max(0, (extracted.total_amount ?? 0) - taxAmt);
+      const extractedTotal = extracted.total_amount ?? (baseAmount + taxAmt);
+
+      // Try matching with chosen account
+      const matched = fuzzyMatchSubscription(vendorName, subs, accountEmail);
+      if (matched) {
+        const exchangeRate = extractedCurrency === 'INR' ? 1 : (matched.exchange_rate ?? 87);
+        const inrAmt = extractedTotal * exchangeRate;
+        const savedInv = await saveSubscriptionInvoice({
+          subscription_id: matched.id,
+          invoice_number: extracted.invoice_number || undefined,
+          invoice_date: extracted.invoice_date || undefined,
+          billing_period_from: extracted.billing_period_from || undefined,
+          billing_period_to: extracted.billing_period_to || undefined,
+          currency: extractedCurrency, amount: baseAmount, tax_amount: taxAmt,
+          total_amount: extractedTotal, exchange_rate: exchangeRate, inr_amount: inrAmt,
+          file_name: file.name,
+        });
+        try { const url = await uploadSubscriptionInvoiceFile(file, savedInv.id); if (url) { await saveSubscriptionInvoice({ id: savedInv.id, file_url: url }); savedInv.file_url = url; } } catch {}
+        setInvoicesMap(prev => ({ ...prev, [matched.id]: [savedInv, ...(prev[matched.id] || [])] }));
+        setQueueItems(prev => prev.map((q, i) => i === idx ? { ...q, status: 'saved' as const, subName: matched.vendor_name, deferred: undefined } : q));
+      } else {
+        const exchangeRate = extractedCurrency === 'INR' ? 1 : 87;
+        const inrAmt = extractedTotal * exchangeRate;
+        const computedTaxRate = subtotal > 0 ? parseFloat(((taxAmt / subtotal) * 100).toFixed(2)) : 0;
+        const savedSub = await saveSubscription({
+          vendor_name: vendorName, service_name: vendorName, billing_cycle: 'monthly',
+          currency: extractedCurrency, amount: baseAmount, tax_rate: computedTaxRate,
+          tax_amount: taxAmt, total_amount: extractedTotal, exchange_rate: exchangeRate,
+          inr_amount: inrAmt, account_email: accountEmail, status: 'active',
+          start_date: extracted.invoice_date || undefined,
+        });
+        setSubs(prev => [savedSub, ...prev]);
+        const savedInv = await saveSubscriptionInvoice({
+          subscription_id: savedSub.id,
+          invoice_number: extracted.invoice_number || undefined,
+          invoice_date: extracted.invoice_date || undefined,
+          billing_period_from: extracted.billing_period_from || undefined,
+          billing_period_to: extracted.billing_period_to || undefined,
+          currency: extractedCurrency, amount: baseAmount, tax_amount: taxAmt,
+          total_amount: extractedTotal, exchange_rate: exchangeRate, inr_amount: inrAmt,
+          file_name: file.name,
+        });
+        try { const url = await uploadSubscriptionInvoiceFile(file, savedInv.id); if (url) { await saveSubscriptionInvoice({ id: savedInv.id, file_url: url }); savedInv.file_url = url; } } catch {}
+        setInvoicesMap(prev => ({ ...prev, [savedSub.id]: [savedInv] }));
+        setQueueItems(prev => prev.map((q, i) => i === idx ? { ...q, status: 'saved' as const, subName: `New: ${vendorName}`, deferred: undefined } : q));
+      }
+    } catch (err) {
+      setQueueItems(prev => prev.map((q, i) => i === idx ? { ...q, status: 'error' as const, error: err instanceof Error ? err.message : 'Failed', deferred: undefined } : q));
+    }
+  }
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop: onTopLevelDrop,
@@ -767,13 +852,36 @@ export default function Subscriptions() {
           <div className="divide-y divide-slate-100">
             {queueItems.map((item, i) => (
               <div key={i} className="flex items-center gap-3 px-4 py-2.5 text-xs">
-                {item.status === 'pending'    && <div className="w-3.5 h-3.5 rounded-full border-2 border-slate-200 shrink-0" />}
-                {item.status === 'processing' && <Loader2 size={14} className="text-indigo-500 animate-spin shrink-0" />}
-                {item.status === 'saved'      && <CheckCircle size={14} className="text-emerald-500 shrink-0" />}
-                {item.status === 'error'      && <AlertCircle size={14} className="text-red-500 shrink-0" />}
+                {item.status === 'pending'        && <div className="w-3.5 h-3.5 rounded-full border-2 border-slate-200 shrink-0" />}
+                {item.status === 'processing'     && <Loader2 size={14} className="text-indigo-500 animate-spin shrink-0" />}
+                {item.status === 'saved'          && <CheckCircle size={14} className="text-emerald-500 shrink-0" />}
+                {item.status === 'error'          && <AlertCircle size={14} className="text-red-500 shrink-0" />}
+                {item.status === 'needs_account'  && <AlertCircle size={14} className="text-amber-500 shrink-0" />}
                 <span className="text-slate-600 flex-1 truncate">{item.fileName}</span>
                 {item.status === 'saved' && <span className="text-emerald-600 font-medium shrink-0">{item.subName}</span>}
                 {item.status === 'error' && <span className="text-red-500 shrink-0">{item.error}</span>}
+                {item.status === 'needs_account' && (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-amber-600 font-medium text-[11px]">{item.subName}</span>
+                    <select
+                      value={item.selectedAccount || ''}
+                      onChange={e => setQueueItems(prev => prev.map((q, j) => j === i ? { ...q, selectedAccount: e.target.value } : q))}
+                      className="text-[11px] border border-amber-300 rounded px-1.5 py-0.5 focus:outline-none focus:ring-1 focus:ring-amber-400 max-w-[180px]"
+                    >
+                      {billingAccounts.map(a => (
+                        <option key={a.email} value={a.email}>{a.label || a.email}</option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => saveDeferredItem(i)}
+                      className="w-5 h-5 flex items-center justify-center rounded bg-amber-100 hover:bg-amber-200 text-amber-700"
+                      title="Save with selected account"
+                    >
+                      <Check size={10} />
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
           </div>
