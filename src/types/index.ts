@@ -202,6 +202,7 @@ export interface ExtractedInvoiceData {
   document_type?: string;
   // Bill to
   buyer_name?: string;
+  buyer_email?: string;
   buyer_gstin?: string;
   buyer_address?: string;
   // Line items
