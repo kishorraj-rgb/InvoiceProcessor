@@ -634,8 +634,9 @@ export default function Subscriptions() {
       const baseAmount = subtotal > 0 ? subtotal : Math.max(0, (extracted.total_amount ?? 0) - taxAmt);
       const extractedTotal = extracted.total_amount ?? (baseAmount + taxAmt);
 
-      // Try matching with chosen account
-      const matched = fuzzyMatchSubscription(vendorName, subs, accountEmail);
+      // Only match subscriptions under the chosen account (no fallback to other accounts)
+      const accountSubs = subs.filter(s => s.account_email?.toLowerCase() === accountEmail.toLowerCase());
+      const matched = fuzzyMatchSubscription(vendorName, accountSubs, accountEmail);
       if (matched) {
         const exchangeRate = extractedCurrency === 'INR' ? 1 : (matched.exchange_rate ?? 87);
         const inrAmt = extractedTotal * exchangeRate;
