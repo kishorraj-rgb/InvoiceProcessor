@@ -609,8 +609,8 @@ export default function Subscriptions() {
           ));
         } else {
           // ── Auto-create new subscription + first invoice ──
-          // If no buyer email extracted and multiple accounts exist, defer and ask user
-          if (!buyerEmail && billingAccounts.length > 1) {
+          // If multiple accounts exist, always ask user to pick one
+          if (billingAccounts.length > 1) {
             setQueueItems(prev => prev.map((item, idx) => idx === i
               ? { ...item, status: 'needs_account' as const, subName: vendorName, deferred: { extracted, file, vendorName }, selectedAccount: billingAccounts[0]?.email }
               : item,
