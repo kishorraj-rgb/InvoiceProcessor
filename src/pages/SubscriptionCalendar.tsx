@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import {
   getSubscriptions,
+  getSubscriptionInvoices,
   getSubscriptionInvoicesInRange,
 } from '../lib/supabase';
 import type { Subscription, SubscriptionInvoice } from '../types';
@@ -66,19 +67,49 @@ interface CalendarEvent {
   amount: number; // INR
 }
 
-/** Project renewal dates for a subscription across a given month */
-function projectRenewals(sub: Subscription, year: number, month: number): string[] {
-  if (sub.status === 'cancelled' || !sub.next_renewal_date || sub.billing_cycle === 'one-time') return [];
+/** Project renewal dates for a subscription across a given month.
+ *  Uses next_renewal_date if set, otherwise derives the renewal day
+ *  from start_date or invoice history. */
+function projectRenewals(
+  sub: Subscription,
+  year: number,
+  month: number,
+  invoices?: SubscriptionInvoice[],
+): string[] {
+  if (sub.status === 'cancelled' || sub.billing_cycle === 'one-time') return [];
 
-  const renewalDate = new Date(sub.next_renewal_date);
-  const renewalDay = renewalDate.getDate();
+  // Determine the renewal day-of-month from available data
+  let renewalDay: number | null = null;
+
+  if (sub.next_renewal_date) {
+    renewalDay = new Date(sub.next_renewal_date).getDate();
+  } else if (invoices && invoices.length > 0) {
+    // Use the most common invoice day from history
+    const days = invoices
+      .filter(i => i.invoice_date)
+      .map(i => new Date(i.invoice_date!).getDate());
+    if (days.length > 0) {
+      renewalDay = days.sort((a, b) =>
+        days.filter(d => d === b).length - days.filter(d => d === a).length
+      )[0];
+    }
+  } else if (sub.start_date) {
+    renewalDay = new Date(sub.start_date).getDate();
+  }
+
+  if (!renewalDay) return [];
+
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const day = Math.min(renewalDay, daysInMonth);
 
-  // Check if this month should have a renewal based on billing cycle
-  const subStart = sub.start_date ? new Date(sub.start_date) : renewalDate;
-  const monthDiff = (year - subStart.getFullYear()) * 12 + (month - subStart.getMonth());
+  const subStart = sub.start_date
+    ? new Date(sub.start_date)
+    : sub.next_renewal_date
+      ? new Date(sub.next_renewal_date)
+      : null;
+  if (!subStart) return [];
 
+  const monthDiff = (year - subStart.getFullYear()) * 12 + (month - subStart.getMonth());
   if (monthDiff < 0) return [];
 
   if (sub.billing_cycle === 'monthly') {
@@ -89,11 +120,6 @@ function projectRenewals(sub: Subscription, year: number, month: number): string
   }
   if (sub.billing_cycle === 'annual' && monthDiff % 12 === 0) {
     return [toDateStr(new Date(year, month, day))];
-  }
-
-  // Fallback: check if the next_renewal_date itself falls in this month
-  if (renewalDate.getFullYear() === year && renewalDate.getMonth() === month) {
-    return [toDateStr(renewalDate)];
   }
 
   return [];
@@ -107,6 +133,7 @@ export default function SubscriptionCalendar() {
   const [month, setMonth] = useState(today.getMonth());
   const [subs, setSubs] = useState<Subscription[]>([]);
   const [invoices, setInvoices] = useState<(SubscriptionInvoice & { vendor_name: string; service_name: string })[]>([]);
+  const [allInvoicesMap, setAllInvoicesMap] = useState<Record<string, SubscriptionInvoice[]>>({});
   const [loading, setLoading] = useState(true);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
 
@@ -136,11 +163,21 @@ export default function SubscriptionCalendar() {
         const allSubs = await getSubscriptions();
         setSubs(allSubs);
 
+        // Fetch invoices for the current month (for display)
         const from = `${year}-${String(month + 1).padStart(2, '0')}-01`;
         const lastDay = new Date(year, month + 1, 0).getDate();
         const to = `${year}-${String(month + 1).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
         const invs = await getSubscriptionInvoicesInRange(from, to);
         setInvoices(invs);
+
+        // Fetch all invoices per sub (for renewal day derivation)
+        const entries = await Promise.all(
+          allSubs.map(async (s) => {
+            const subInvs = await getSubscriptionInvoices(s.id);
+            return [s.id, subInvs] as [string, SubscriptionInvoice[]];
+          }),
+        );
+        setAllInvoicesMap(Object.fromEntries(entries));
       } catch (err) {
         console.error('Failed to load calendar data:', err);
       } finally {
@@ -155,7 +192,7 @@ export default function SubscriptionCalendar() {
 
     // Renewals
     for (const sub of subs) {
-      const dates = projectRenewals(sub, year, month);
+      const dates = projectRenewals(sub, year, month, allInvoicesMap[sub.id]);
       for (const date of dates) {
         const isPast = date < todayStr;
         const hasInvoice = invoices.some(
@@ -185,7 +222,7 @@ export default function SubscriptionCalendar() {
     }
 
     return all;
-  }, [subs, invoices, year, month, todayStr]);
+  }, [subs, invoices, allInvoicesMap, year, month, todayStr]);
 
   // Group events by date
   const eventsByDate = useMemo(() => {
