@@ -553,14 +553,8 @@ export default function Subscriptions() {
 
         const matched = allMatches.length === 1 ? allMatches[0] : fuzzyMatchSubscription(vendorName, liveSubs, buyerEmail);
 
-        const extractedCurrency = extracted.currency ?? 'USD';
-        const subtotal = extracted.subtotal ?? 0;
-        const taxAmt = extracted.tax_amount ?? 0;
-        const baseAmount = subtotal > 0 ? subtotal : Math.max(0, (extracted.total_amount ?? 0) - taxAmt);
-        const extractedTotal = extracted.total_amount ?? (baseAmount + taxAmt);
-
         if (matched) {
-          // ── Auto-save invoice to existing subscription ──
+          // ── Existing subscription matched ──
           // Dedup: fetch invoices from DB if not already loaded, then check for duplicate invoice_number
           let existingInvs = invoicesMap[matched.id];
           if (!existingInvs) {
@@ -577,36 +571,23 @@ export default function Subscriptions() {
             ));
             continue;
           }
-          const exchangeRate = extractedCurrency === 'INR' ? 1 : (matched.exchange_rate ?? 87);
-          const inrAmt = extractedTotal * exchangeRate;
-          const invPayload: Partial<SubscriptionInvoice> = {
-            subscription_id: matched.id,
-            invoice_number: extracted.invoice_number || undefined,
-            invoice_date: extracted.invoice_date || undefined,
-            billing_period_from: extracted.billing_period_from || undefined,
-            billing_period_to: extracted.billing_period_to || undefined,
-            currency: extractedCurrency,
-            amount: baseAmount,
-            tax_amount: taxAmt,
-            total_amount: extractedTotal,
-            exchange_rate: exchangeRate,
-            inr_amount: inrAmt,
-            file_name: file.name,
-          };
-          const savedInv = await saveSubscriptionInvoice(invPayload);
-          try {
-            const url = await uploadSubscriptionInvoiceFile(file, savedInv.id);
-            if (url) {
-              await saveSubscriptionInvoice({ id: savedInv.id, file_url: url });
-              savedInv.file_url = url;
-            }
-          } catch { /* upload non-fatal */ }
-          setInvoicesMap(prev => ({ ...prev, [matched.id]: [savedInv, ...(prev[matched.id] || [])] }));
-          if (!firstSavedSubId) firstSavedSubId = matched.id;
+          // Always ask user to confirm account before saving
+          if (billingAccounts.length === 0) {
+            setQueueItems(prev => prev.map((item, idx) => idx === i
+              ? { ...item, status: 'error' as const, error: 'No billing accounts configured — add one in Settings first' }
+              : item,
+            ));
+            continue;
+          }
+          const matchedAccount = matched.account_email?.toLowerCase().trim();
+          const preselect = matchedAccount && billingAccounts.some(a => a.email.toLowerCase() === matchedAccount)
+            ? matched.account_email!
+            : billingAccounts[0]?.email;
           setQueueItems(prev => prev.map((item, idx) => idx === i
-            ? { ...item, status: 'saved', subName: matched.vendor_name }
+            ? { ...item, status: 'needs_account' as const, subName: matched.vendor_name, deferred: { extracted, file, vendorName }, selectedAccount: preselect }
             : item,
           ));
+          continue;
         } else {
           // ── Auto-create new subscription + first invoice ──
           // No billing accounts configured → block

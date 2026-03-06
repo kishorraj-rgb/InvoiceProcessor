@@ -14,6 +14,7 @@ import {
   FileSpreadsheet,
   LayoutGrid,
   RefreshCw,
+  ShieldCheck,
 } from 'lucide-react';
 
 const navItems = [
@@ -27,6 +28,7 @@ const navItems = [
   { to: '/team',       label: 'Team',             icon: UserCog },
   { to: '/reports',      label: 'Reports',       icon: FileSpreadsheet },
   { to: '/spend-matrix', label: 'Spend Matrix',  icon: LayoutGrid },
+  { to: '/admin',        label: 'Admin',          icon: ShieldCheck },
 ];
 
 const PROFILE_KEY = 'ip-profile';
