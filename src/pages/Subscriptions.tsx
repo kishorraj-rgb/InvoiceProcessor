@@ -242,6 +242,14 @@ export default function Subscriptions() {
   // Reassign invoice to different subscription
   const [reassigningInvId, setReassigningInvId] = useState<string | null>(null);
   const [reassignTargetSubId, setReassignTargetSubId] = useState<string>('');
+  // Inline invoice editing
+  const [editingInvId, setEditingInvId] = useState<string | null>(null);
+  const [editInvForm, setEditInvForm] = useState<{
+    invoice_number: string; invoice_date: string;
+    billing_period_from: string; billing_period_to: string;
+    currency: string; amount: string; tax_amount: string;
+    total_amount: string; exchange_rate: string;
+  }>({ invoice_number: '', invoice_date: '', billing_period_from: '', billing_period_to: '', currency: 'USD', amount: '', tax_amount: '', total_amount: '', exchange_rate: '' });
 
   // Currency display toggle
   const [viewCurrency, setViewCurrency] = useState<'USD' | 'INR'>('USD');
@@ -519,6 +527,55 @@ export default function Subscriptions() {
     }
     setReassigningInvId(null);
     setReassignTargetSubId('');
+  }
+
+  function startEditInvoice(inv: SubscriptionInvoice) {
+    setEditingInvId(inv.id);
+    setEditInvForm({
+      invoice_number: inv.invoice_number || '',
+      invoice_date: inv.invoice_date || '',
+      billing_period_from: inv.billing_period_from || '',
+      billing_period_to: inv.billing_period_to || '',
+      currency: inv.currency || 'USD',
+      amount: String(inv.amount ?? ''),
+      tax_amount: String(inv.tax_amount ?? ''),
+      total_amount: String(inv.total_amount ?? ''),
+      exchange_rate: String(inv.exchange_rate ?? ''),
+    });
+    setDeletingInvId(null);
+    setReassigningInvId(null);
+  }
+
+  async function saveEditInvoice(subId: string) {
+    if (!editingInvId) return;
+    const amount = parseFloat(editInvForm.amount) || 0;
+    const taxAmt = parseFloat(editInvForm.tax_amount) || 0;
+    const total = parseFloat(editInvForm.total_amount) || (amount + taxAmt);
+    const exRate = parseFloat(editInvForm.exchange_rate) || 87;
+    const inrAmt = editInvForm.currency === 'INR' ? total : total * exRate;
+    try {
+      await saveSubscriptionInvoice({
+        id: editingInvId,
+        invoice_number: editInvForm.invoice_number || undefined,
+        invoice_date: editInvForm.invoice_date || undefined,
+        billing_period_from: editInvForm.billing_period_from || undefined,
+        billing_period_to: editInvForm.billing_period_to || undefined,
+        currency: editInvForm.currency,
+        amount, tax_amount: taxAmt, total_amount: total,
+        exchange_rate: exRate, inr_amount: inrAmt,
+      });
+      setInvoicesMap(prev => ({
+        ...prev,
+        [subId]: (prev[subId] || []).map(inv =>
+          inv.id === editingInvId
+            ? { ...inv, invoice_number: editInvForm.invoice_number || undefined, invoice_date: editInvForm.invoice_date || undefined, billing_period_from: editInvForm.billing_period_from || undefined, billing_period_to: editInvForm.billing_period_to || undefined, currency: editInvForm.currency, amount, tax_amount: taxAmt, total_amount: total, exchange_rate: exRate, inr_amount: inrAmt }
+            : inv,
+        ),
+      }));
+    } catch (err) {
+      showAlert('Update Failed', err instanceof Error ? err.message : 'Failed to update invoice.');
+    }
+    setEditingInvId(null);
   }
 
   // ── Top-level drop zone handler (multi-file, auto-save) ──
@@ -1219,7 +1276,28 @@ export default function Subscriptions() {
                               <span />
                             </div>
                           )}
-                          {subInvoices.map(inv => (
+                          {subInvoices.map(inv => editingInvId === inv.id ? (
+                            <div key={inv.id} className="grid grid-cols-[2fr_1fr_2fr_1fr_1fr_auto] gap-2 py-2 items-center text-xs bg-amber-50/50 -mx-2 px-2 rounded-lg">
+                              <input value={editInvForm.invoice_number} onChange={e => setEditInvForm(f => ({ ...f, invoice_number: e.target.value }))} className="border border-slate-200 rounded px-1.5 py-1 text-xs w-full" placeholder="Invoice #" />
+                              <input type="date" value={editInvForm.invoice_date} onChange={e => setEditInvForm(f => ({ ...f, invoice_date: e.target.value }))} className="border border-slate-200 rounded px-1.5 py-1 text-xs w-full" />
+                              <div className="flex gap-1">
+                                <input type="date" value={editInvForm.billing_period_from} onChange={e => setEditInvForm(f => ({ ...f, billing_period_from: e.target.value }))} className="border border-slate-200 rounded px-1 py-1 text-xs flex-1" title="Period from" />
+                                <input type="date" value={editInvForm.billing_period_to} onChange={e => setEditInvForm(f => ({ ...f, billing_period_to: e.target.value }))} className="border border-slate-200 rounded px-1 py-1 text-xs flex-1" title="Period to" />
+                              </div>
+                              <div className="flex gap-1 items-center">
+                                <select value={editInvForm.currency} onChange={e => setEditInvForm(f => ({ ...f, currency: e.target.value }))} className="border border-slate-200 rounded px-1 py-1 text-xs w-14">
+                                  <option value="USD">USD</option>
+                                  <option value="INR">INR</option>
+                                </select>
+                                <input value={editInvForm.total_amount} onChange={e => setEditInvForm(f => ({ ...f, total_amount: e.target.value }))} className="border border-slate-200 rounded px-1.5 py-1 text-xs flex-1 w-16" placeholder="Total" />
+                              </div>
+                              <input value={editInvForm.exchange_rate} onChange={e => setEditInvForm(f => ({ ...f, exchange_rate: e.target.value }))} className="border border-slate-200 rounded px-1.5 py-1 text-xs w-full" placeholder="Ex. Rate" title="Exchange rate" />
+                              <div className="flex items-center gap-1">
+                                <button type="button" onClick={() => saveEditInvoice(sub.id)} className="w-5 h-5 flex items-center justify-center rounded bg-emerald-100 hover:bg-emerald-200 text-emerald-700" title="Save"><Check size={10} /></button>
+                                <button type="button" onClick={() => setEditingInvId(null)} className="w-5 h-5 flex items-center justify-center rounded hover:bg-slate-200 text-slate-500" title="Cancel"><X size={10} /></button>
+                              </div>
+                            </div>
+                          ) : (
                             <div key={inv.id} className="grid grid-cols-[2fr_1fr_2fr_1fr_1fr_auto] gap-3 py-2 items-center text-xs">
                               <span className="text-slate-700 font-medium">{inv.invoice_number || '—'}</span>
                               <span className="text-slate-500">{fmtDate(inv.invoice_date)}</span>
@@ -1243,6 +1321,14 @@ export default function Subscriptions() {
                                     <Eye size={12} />
                                   </button>
                                 )}
+                                <button
+                                  type="button"
+                                  title="Edit invoice"
+                                  onClick={() => startEditInvoice(inv)}
+                                  className="w-5 h-5 flex items-center justify-center rounded hover:bg-amber-50 text-slate-400 hover:text-amber-600"
+                                >
+                                  <Pencil size={11} />
+                                </button>
                                 {reassigningInvId === inv.id ? (
                                   <div className="flex items-center gap-1">
                                     <select

@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from 'react';
-import { Receipt, Search, Calendar, LayoutGrid, DollarSign, IndianRupee } from 'lucide-react';
+import { Receipt, Search, Calendar, LayoutGrid, DollarSign, IndianRupee, Download } from 'lucide-react';
 import {
   getSubscriptions,
   getSubscriptionInvoices,
@@ -222,6 +222,56 @@ export default function SubscriptionReceipts() {
 
   const fmt = viewCurrency === 'USD' ? fmtUSD : fmtINR;
 
+  function downloadCSV() {
+    const periods = viewMode === 'monthly' ? fyMonths : fyQuarters;
+    const grid = viewMode === 'monthly' ? monthGrid : quarterGrid;
+    const totals = viewMode === 'monthly' ? monthTotals : quarterTotals;
+
+    // Header row
+    const headers = ['#', 'Vendor', 'Account', 'Plan', 'Status', 'Type', 'Start', ...periods.map(p => p.label), 'Total'];
+
+    const rows: string[][] = [];
+    filtered.forEach((sub, idx) => {
+      const byPeriod = grid[sub.id] || {};
+      const periodValues = periods.map(p => {
+        const val = viewMode === 'monthly'
+          ? (byPeriod[p.key] || 0)
+          : ((byPeriod as Record<string, number>)[p.key] || 0);
+        return val > 0 ? val.toFixed(2) : '';
+      });
+      const rowTotal = periods.reduce((sum, p) => sum + ((byPeriod as Record<string, number>)[p.key] || 0), 0);
+      rows.push([
+        String(idx + 1),
+        sub.vendor_name,
+        sub.account_email || '',
+        sub.service_name || '',
+        sub.status,
+        sub.billing_cycle,
+        sub.start_date || '',
+        ...periodValues,
+        rowTotal > 0 ? rowTotal.toFixed(2) : '',
+      ]);
+    });
+
+    // Totals row
+    const totalValues = periods.map(p => {
+      const val = (totals as Record<string, number>)[p.key] || 0;
+      return val > 0 ? val.toFixed(2) : '';
+    });
+    rows.push(['', '', '', '', '', '', 'TOTAL', ...totalValues, grandTotal > 0 ? grandTotal.toFixed(2) : '']);
+
+    const escape = (s: string) => s.includes(',') || s.includes('"') ? `"${s.replace(/"/g, '""')}"` : s;
+    const csv = [headers.map(escape).join(','), ...rows.map(r => r.map(escape).join(','))].join('\n');
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `subscriptions-${viewMode}-${viewCurrency}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -318,6 +368,14 @@ export default function SubscriptionReceipts() {
             <LayoutGrid size={12} /> Quarterly
           </button>
         </div>
+        <button
+          type="button"
+          onClick={downloadCSV}
+          className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium border border-slate-200 rounded-lg bg-white text-slate-600 hover:text-indigo-600 hover:border-indigo-300 hover:bg-indigo-50 shadow-sm transition-colors"
+          title="Download CSV"
+        >
+          <Download size={12} /> CSV
+        </button>
       </div>
 
       {/* Table */}
