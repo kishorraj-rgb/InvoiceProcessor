@@ -490,6 +490,8 @@ export default function Subscriptions() {
     setQueueBusy(true);
     setQueueItems(acceptedFiles.map(f => ({ fileName: f.name, status: 'pending' as const })));
     let firstSavedSubId: string | null = null;
+    // Live list that grows as new subs are created, so subsequent files match existing subs
+    let liveSubs = [...subs];
 
     for (let i = 0; i < acceptedFiles.length; i++) {
       const file = acceptedFiles[i];
@@ -498,7 +500,7 @@ export default function Subscriptions() {
       try {
         const extracted = await extractInvoiceData(file);
         const vendorName = extracted.vendor_name || 'Unknown Vendor';
-        const matched = fuzzyMatchSubscription(vendorName, subs);
+        const matched = fuzzyMatchSubscription(vendorName, liveSubs);
 
         const extractedCurrency = extracted.currency ?? 'USD';
         const subtotal = extracted.subtotal ?? 0;
@@ -559,6 +561,7 @@ export default function Subscriptions() {
             start_date: extracted.invoice_date || undefined,
           };
           const savedSub = await saveSubscription(subPayload);
+          liveSubs = [savedSub, ...liveSubs];
           setSubs(prev => [savedSub, ...prev]);
           const invPayload: Partial<SubscriptionInvoice> = {
             subscription_id: savedSub.id,
