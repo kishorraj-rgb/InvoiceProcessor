@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from 'react';
-import { Receipt, Search, Calendar, LayoutGrid } from 'lucide-react';
+import { Receipt, Search, Calendar, LayoutGrid, DollarSign, IndianRupee } from 'lucide-react';
 import {
   getSubscriptions,
   getSubscriptionInvoices,
@@ -15,6 +15,22 @@ function fmtINR(n: number) {
     currency: 'INR',
     maximumFractionDigits: 0,
   }).format(n);
+}
+
+function fmtUSD(n: number) {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 2,
+  }).format(n);
+}
+
+const FALLBACK_USD_INR = 87;
+
+function invToUSD(inv: { total_amount: number; currency: string; exchange_rate: number }): number {
+  if (inv.currency === 'USD') return inv.total_amount;
+  const rate = (inv.exchange_rate ?? 0) > 1 ? inv.exchange_rate : FALLBACK_USD_INR;
+  return inv.total_amount / rate;
 }
 
 function fmtDate(d?: string) {
@@ -91,6 +107,7 @@ export default function SubscriptionReceipts() {
   const [statusFilter, setStatusFilter] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
   const [viewMode, setViewMode] = useState<'monthly' | 'quarterly'>('monthly');
+  const [viewCurrency, setViewCurrency] = useState<'INR' | 'USD'>('INR');
 
   const fyMonths = useMemo(() => getFYMonths(), []);
   const fyQuarters = useMemo(() => getFYQuarters(), []);
@@ -139,21 +156,27 @@ export default function SubscriptionReceipts() {
     return list;
   }, [subs, statusFilter, typeFilter, search]);
 
-  // Build month→amount map for each sub
-  const monthGrid = useMemo(() => {
-    const grid: Record<string, Record<string, number>> = {};
+  // Build month→amount grids (INR + USD) for each sub
+  const { monthGridINR, monthGridUSD } = useMemo(() => {
+    const inr: Record<string, Record<string, number>> = {};
+    const usd: Record<string, Record<string, number>> = {};
     for (const sub of filtered) {
       const invs = invoicesMap[sub.id] || [];
-      const byMonth: Record<string, number> = {};
+      const byMonthINR: Record<string, number> = {};
+      const byMonthUSD: Record<string, number> = {};
       for (const inv of invs) {
         if (!inv.invoice_date) continue;
-        const key = inv.invoice_date.slice(0, 7); // YYYY-MM
-        byMonth[key] = (byMonth[key] || 0) + (inv.inr_amount ?? inv.total_amount ?? 0);
+        const key = inv.invoice_date.slice(0, 7);
+        byMonthINR[key] = (byMonthINR[key] || 0) + (inv.inr_amount ?? inv.total_amount ?? 0);
+        byMonthUSD[key] = (byMonthUSD[key] || 0) + invToUSD(inv);
       }
-      grid[sub.id] = byMonth;
+      inr[sub.id] = byMonthINR;
+      usd[sub.id] = byMonthUSD;
     }
-    return grid;
+    return { monthGridINR: inr, monthGridUSD: usd };
   }, [filtered, invoicesMap]);
+
+  const monthGrid = viewCurrency === 'USD' ? monthGridUSD : monthGridINR;
 
   // Monthly totals row
   const monthTotals = useMemo(() => {
@@ -196,6 +219,8 @@ export default function SubscriptionReceipts() {
     () => Object.values(monthTotals).reduce((a, b) => a + b, 0),
     [monthTotals],
   );
+
+  const fmt = viewCurrency === 'USD' ? fmtUSD : fmtINR;
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -251,6 +276,27 @@ export default function SubscriptionReceipts() {
           <option value="one-time">One-Time</option>
         </select>
         <div className="flex-1" />
+        {/* USD / INR toggle */}
+        <div className="flex items-center bg-white border border-slate-200 rounded-lg overflow-hidden text-xs font-medium shadow-sm">
+          <button
+            type="button"
+            onClick={() => setViewCurrency('INR')}
+            className={`flex items-center gap-1.5 px-3 py-2 transition-colors ${
+              viewCurrency === 'INR' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            <IndianRupee size={11} /> INR
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewCurrency('USD')}
+            className={`flex items-center gap-1.5 px-3 py-2 transition-colors ${
+              viewCurrency === 'USD' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            <DollarSign size={11} /> USD
+          </button>
+        </div>
         {/* Monthly / Quarterly toggle */}
         <div className="flex items-center bg-white border border-slate-200 rounded-lg overflow-hidden text-xs font-medium shadow-sm">
           <button
@@ -373,7 +419,7 @@ export default function SubscriptionReceipts() {
                                   val ? 'text-slate-700 font-medium' : 'text-slate-300'
                                 }`}
                               >
-                                {val ? fmtINR(val) : '–'}
+                                {val ? fmt(val) : '–'}
                               </td>
                             );
                           })
@@ -386,7 +432,7 @@ export default function SubscriptionReceipts() {
                                   val ? 'text-slate-700 font-medium' : 'text-slate-300'
                                 }`}
                               >
-                                {val ? fmtINR(val) : '–'}
+                                {val ? fmt(val) : '–'}
                               </td>
                             );
                           })}
@@ -398,7 +444,7 @@ export default function SubscriptionReceipts() {
               <tfoot>
                 <tr className="bg-slate-50 border-t-2 border-slate-200">
                   <td colSpan={7} className="px-4 py-3 text-sm font-bold text-slate-700">
-                    Total ({filtered.length} subscriptions) — {fmtINR(grandTotal)} FY Total
+                    Total ({filtered.length} subscriptions) — {fmt(grandTotal)} FY Total
                   </td>
                   {viewMode === 'monthly'
                     ? fyMonths.map((m) => (
@@ -408,7 +454,7 @@ export default function SubscriptionReceipts() {
                             monthTotals[m.key] ? 'text-slate-800' : 'text-slate-300'
                           }`}
                         >
-                          {monthTotals[m.key] ? fmtINR(monthTotals[m.key]) : '–'}
+                          {monthTotals[m.key] ? fmt(monthTotals[m.key]) : '–'}
                         </td>
                       ))
                     : fyQuarters.map((q) => (
@@ -418,7 +464,7 @@ export default function SubscriptionReceipts() {
                             quarterTotals[q.key] ? 'text-slate-800' : 'text-slate-300'
                           }`}
                         >
-                          {quarterTotals[q.key] ? fmtINR(quarterTotals[q.key]) : '–'}
+                          {quarterTotals[q.key] ? fmt(quarterTotals[q.key]) : '–'}
                         </td>
                       ))}
                 </tr>
