@@ -47,6 +47,7 @@ Analyze this invoice and extract ALL available information. Return a valid JSON 
   "payment_terms": "Payment terms e.g. Net 30, Immediate, Due on receipt",
   "document_type": "Type of document e.g. Tax Invoice, Proforma Invoice, Credit Note, Debit Note",
   "buyer_name": "Name of buyer/recipient company",
+  "buyer_email": "Email address of the buyer/recipient if present on invoice",
   "buyer_gstin": "GST number of buyer if present",
   "buyer_address": "Full billing address of buyer",
   "line_items": [

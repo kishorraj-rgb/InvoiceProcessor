@@ -144,32 +144,44 @@ function statusBadge(status: string) {
 function fuzzyMatchSubscription(
   extractedVendorName: string,
   subscriptions: Subscription[],
+  buyerEmail?: string | null,
 ): Subscription | null {
   if (!extractedVendorName) return null;
   const needle = extractedVendorName.toLowerCase().trim();
+  const email = buyerEmail?.toLowerCase().trim() || null;
 
-  // Pass 1: Exact (case-insensitive)
-  const exact = subscriptions.find(s => s.vendor_name.toLowerCase().trim() === needle);
-  if (exact) return exact;
+  // When buyer email is known, prefer same-account subs first, then fall back to all
+  const candidateSets = email
+    ? [subscriptions.filter(s => s.account_email?.toLowerCase() === email), subscriptions]
+    : [subscriptions];
 
-  // Pass 2: Substring containment (either direction)
-  const containsMatch = subscriptions.find(s => {
-    const subName = s.vendor_name.toLowerCase().trim();
-    return needle.includes(subName) || subName.includes(needle);
-  });
-  if (containsMatch) return containsMatch;
+  for (const candidates of candidateSets) {
+    if (candidates.length === 0) continue;
 
-  // Pass 3: Token-overlap scoring (≥50% shared tokens)
-  const needleTokens = new Set(needle.split(/\s+/));
-  let bestScore = 0;
-  let bestSub: Subscription | null = null;
-  for (const sub of subscriptions) {
-    const subTokens = new Set(sub.vendor_name.toLowerCase().trim().split(/\s+/));
-    const shared = [...needleTokens].filter(t => subTokens.has(t)).length;
-    const score = shared / Math.max(needleTokens.size, subTokens.size);
-    if (score > bestScore) { bestScore = score; bestSub = sub; }
+    // Pass 1: Exact (case-insensitive)
+    const exact = candidates.find(s => s.vendor_name.toLowerCase().trim() === needle);
+    if (exact) return exact;
+
+    // Pass 2: Substring containment (either direction)
+    const containsMatch = candidates.find(s => {
+      const subName = s.vendor_name.toLowerCase().trim();
+      return needle.includes(subName) || subName.includes(needle);
+    });
+    if (containsMatch) return containsMatch;
+
+    // Pass 3: Token-overlap scoring (≥50% shared tokens)
+    const needleTokens = new Set(needle.split(/\s+/));
+    let bestScore = 0;
+    let bestSub: Subscription | null = null;
+    for (const sub of candidates) {
+      const subTokens = new Set(sub.vendor_name.toLowerCase().trim().split(/\s+/));
+      const shared = [...needleTokens].filter(t => subTokens.has(t)).length;
+      const score = shared / Math.max(needleTokens.size, subTokens.size);
+      if (score > bestScore) { bestScore = score; bestSub = sub; }
+    }
+    if (bestScore >= 0.5) return bestSub;
   }
-  return bestScore >= 0.5 ? bestSub : null;
+  return null;
 }
 
 // ── Default form states ───────────────────────────────────────────────────────
@@ -502,7 +514,8 @@ export default function Subscriptions() {
       try {
         const extracted = await extractInvoiceData(file);
         const vendorName = extracted.vendor_name || 'Unknown Vendor';
-        const matched = fuzzyMatchSubscription(vendorName, liveSubs);
+        const buyerEmail = extracted.buyer_email || null;
+        const matched = fuzzyMatchSubscription(vendorName, liveSubs, buyerEmail);
 
         const extractedCurrency = extracted.currency ?? 'USD';
         const subtotal = extracted.subtotal ?? 0;
@@ -568,7 +581,7 @@ export default function Subscriptions() {
             total_amount: extractedTotal,
             exchange_rate: exchangeRate,
             inr_amount: inrAmt,
-            account_email: billingAccounts[0]?.email || undefined,
+            account_email: buyerEmail || billingAccounts[0]?.email || undefined,
             status: 'active',
             start_date: extracted.invoice_date || undefined,
           };
