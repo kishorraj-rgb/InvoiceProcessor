@@ -32,6 +32,7 @@ import {
   uploadSubscriptionInvoiceFile,
 } from '../lib/supabase';
 import { extractInvoiceData } from '../lib/claude';
+import { getBillingAccounts, type BillingAccount } from '../lib/accounts';
 import type { Subscription, SubscriptionInvoice } from '../types';
 import SubscriptionTabBar from '../components/SubscriptionTabBar';
 
@@ -222,6 +223,15 @@ export default function Subscriptions() {
   const [queueItems, setQueueItems] = useState<{ fileName: string; status: 'pending' | 'processing' | 'saved' | 'error'; subName?: string; error?: string }[]>([]);
   const [queueBusy, setQueueBusy] = useState(false);
 
+  // Billing accounts (localStorage)
+  const [billingAccounts, setBillingAccounts] = useState<BillingAccount[]>(getBillingAccounts);
+
+  useEffect(() => {
+    const onUpdate = () => setBillingAccounts(getBillingAccounts());
+    window.addEventListener('ip-accounts-updated', onUpdate);
+    return () => window.removeEventListener('ip-accounts-updated', onUpdate);
+  }, []);
+
   useEffect(() => {
     getSubscriptions()
       .then(setSubs)
@@ -272,7 +282,7 @@ export default function Subscriptions() {
 
   function openAddForm() {
     setEditingSub(null);
-    setForm({ ...EMPTY_FORM });
+    setForm({ ...EMPTY_FORM, account_email: billingAccounts[0]?.email ?? '' });
     setFormError('');
     setShowForm(true);
   }
@@ -303,6 +313,10 @@ export default function Subscriptions() {
     e.preventDefault();
     if (!form.vendor_name.trim() || !form.service_name.trim()) {
       setFormError('Vendor name and service name are required.');
+      return;
+    }
+    if (!form.account_email) {
+      setFormError('Billing account is required for accounting purposes.');
       return;
     }
     setSaving(true);
@@ -520,6 +534,7 @@ export default function Subscriptions() {
             total_amount: extractedTotal,
             exchange_rate: exchangeRate,
             inr_amount: inrAmt,
+            account_email: billingAccounts[0]?.email || undefined,
             status: 'active',
             start_date: extracted.invoice_date || undefined,
           };
@@ -848,13 +863,21 @@ export default function Subscriptions() {
 
               <div className="grid grid-cols-3 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">Account Email</label>
-                  <input
-                    type="email" title="Account email" value={form.account_email}
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Billing Account *</label>
+                  <select
+                    title="Billing account" value={form.account_email}
                     onChange={e => setForm(p => ({ ...p, account_email: e.target.value }))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
-                    placeholder="kishor.raj@icloud.com"
-                  />
+                    className={`w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400 ${
+                      !form.account_email ? 'border-amber-300 bg-amber-50' : 'border-slate-200'
+                    }`}
+                  >
+                    <option value="">— Select account —</option>
+                    {billingAccounts.map(a => (
+                      <option key={a.email} value={a.email}>
+                        {a.email}{a.label ? ` (${a.label})` : ''}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-slate-600 mb-1">Category</label>

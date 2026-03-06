@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from 'react';
-import { Receipt, Search } from 'lucide-react';
+import { Receipt, Search, Calendar, LayoutGrid } from 'lucide-react';
 import {
   getSubscriptions,
   getSubscriptionInvoices,
@@ -68,6 +68,17 @@ function cycleLabel(cycle: string) {
   return cycle.charAt(0).toUpperCase() + cycle.slice(1);
 }
 
+/** Fiscal year quarters: Q1=Apr-Jun, Q2=Jul-Sep, Q3=Oct-Dec, Q4=Jan-Mar */
+function getFYQuarters(): { key: string; label: string; monthKeys: string[] }[] {
+  const fyMonths = getFYMonths();
+  return [
+    { key: 'Q1', label: 'Q1 (Apr–Jun)', monthKeys: fyMonths.slice(0, 3).map(m => m.key) },
+    { key: 'Q2', label: 'Q2 (Jul–Sep)', monthKeys: fyMonths.slice(3, 6).map(m => m.key) },
+    { key: 'Q3', label: 'Q3 (Oct–Dec)', monthKeys: fyMonths.slice(6, 9).map(m => m.key) },
+    { key: 'Q4', label: 'Q4 (Jan–Mar)', monthKeys: fyMonths.slice(9, 12).map(m => m.key) },
+  ];
+}
+
 // ── Component ───────────────────────────────────────────────────────────────
 
 export default function SubscriptionReceipts() {
@@ -79,8 +90,10 @@ export default function SubscriptionReceipts() {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
+  const [viewMode, setViewMode] = useState<'monthly' | 'quarterly'>('monthly');
 
   const fyMonths = useMemo(() => getFYMonths(), []);
+  const fyQuarters = useMemo(() => getFYQuarters(), []);
 
   // Fetch subscriptions & all their invoices
   useEffect(() => {
@@ -157,6 +170,28 @@ export default function SubscriptionReceipts() {
     return totals;
   }, [filtered, monthGrid, fyMonths]);
 
+  // Quarter grid: sub.id → { Q1: amount, Q2: amount, ... }
+  const quarterGrid = useMemo(() => {
+    const grid: Record<string, Record<string, number>> = {};
+    for (const sub of filtered) {
+      const byMonth = monthGrid[sub.id] || {};
+      const byQ: Record<string, number> = {};
+      for (const q of fyQuarters) {
+        byQ[q.key] = q.monthKeys.reduce((sum, mk) => sum + (byMonth[mk] || 0), 0);
+      }
+      grid[sub.id] = byQ;
+    }
+    return grid;
+  }, [filtered, monthGrid, fyQuarters]);
+
+  const quarterTotals = useMemo(() => {
+    const totals: Record<string, number> = {};
+    for (const q of fyQuarters) {
+      totals[q.key] = q.monthKeys.reduce((sum, mk) => sum + (monthTotals[mk] || 0), 0);
+    }
+    return totals;
+  }, [monthTotals, fyQuarters]);
+
   const grandTotal = useMemo(
     () => Object.values(monthTotals).reduce((a, b) => a + b, 0),
     [monthTotals],
@@ -215,6 +250,28 @@ export default function SubscriptionReceipts() {
           <option value="quarterly">Quarterly</option>
           <option value="one-time">One-Time</option>
         </select>
+        <div className="flex-1" />
+        {/* Monthly / Quarterly toggle */}
+        <div className="flex items-center bg-white border border-slate-200 rounded-lg overflow-hidden text-xs font-medium shadow-sm">
+          <button
+            type="button"
+            onClick={() => setViewMode('monthly')}
+            className={`flex items-center gap-1.5 px-3 py-2 transition-colors ${
+              viewMode === 'monthly' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            <Calendar size={12} /> Monthly
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode('quarterly')}
+            className={`flex items-center gap-1.5 px-3 py-2 transition-colors ${
+              viewMode === 'quarterly' ? 'bg-indigo-600 text-white' : 'text-slate-500 hover:text-slate-700'
+            }`}
+          >
+            <LayoutGrid size={12} /> Quarterly
+          </button>
+        </div>
       </div>
 
       {/* Table */}
@@ -253,14 +310,23 @@ export default function SubscriptionReceipts() {
                   <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider px-4 py-3">
                     Start
                   </th>
-                  {fyMonths.map((m) => (
-                    <th
-                      key={m.key}
-                      className="text-right text-xs font-semibold text-slate-500 uppercase tracking-wider px-3 py-3 min-w-[70px]"
-                    >
-                      {m.label}
-                    </th>
-                  ))}
+                  {viewMode === 'monthly'
+                    ? fyMonths.map((m) => (
+                        <th
+                          key={m.key}
+                          className="text-right text-xs font-semibold text-slate-500 uppercase tracking-wider px-3 py-3 min-w-[70px]"
+                        >
+                          {m.label}
+                        </th>
+                      ))
+                    : fyQuarters.map((q) => (
+                        <th
+                          key={q.key}
+                          className="text-right text-xs font-semibold text-slate-500 uppercase tracking-wider px-3 py-3 min-w-[100px]"
+                        >
+                          {q.key}
+                        </th>
+                      ))}
                 </tr>
               </thead>
               <tbody>
@@ -297,19 +363,33 @@ export default function SubscriptionReceipts() {
                       <td className="px-4 py-3 text-slate-500 whitespace-nowrap">
                         {fmtDate(sub.start_date)}
                       </td>
-                      {fyMonths.map((m) => {
-                        const val = byMonth[m.key];
-                        return (
-                          <td
-                            key={m.key}
-                            className={`px-3 py-3 text-right whitespace-nowrap ${
-                              val ? 'text-slate-700 font-medium' : 'text-slate-300'
-                            }`}
-                          >
-                            {val ? fmtINR(val) : '–'}
-                          </td>
-                        );
-                      })}
+                      {viewMode === 'monthly'
+                        ? fyMonths.map((m) => {
+                            const val = byMonth[m.key];
+                            return (
+                              <td
+                                key={m.key}
+                                className={`px-3 py-3 text-right whitespace-nowrap ${
+                                  val ? 'text-slate-700 font-medium' : 'text-slate-300'
+                                }`}
+                              >
+                                {val ? fmtINR(val) : '–'}
+                              </td>
+                            );
+                          })
+                        : fyQuarters.map((q) => {
+                            const val = (quarterGrid[sub.id] || {})[q.key];
+                            return (
+                              <td
+                                key={q.key}
+                                className={`px-3 py-3 text-right whitespace-nowrap ${
+                                  val ? 'text-slate-700 font-medium' : 'text-slate-300'
+                                }`}
+                              >
+                                {val ? fmtINR(val) : '–'}
+                              </td>
+                            );
+                          })}
                     </tr>
                   );
                 })}
@@ -320,16 +400,27 @@ export default function SubscriptionReceipts() {
                   <td colSpan={7} className="px-4 py-3 text-sm font-bold text-slate-700">
                     Total ({filtered.length} subscriptions) — {fmtINR(grandTotal)} FY Total
                   </td>
-                  {fyMonths.map((m) => (
-                    <td
-                      key={m.key}
-                      className={`px-3 py-3 text-right text-sm font-bold whitespace-nowrap ${
-                        monthTotals[m.key] ? 'text-slate-800' : 'text-slate-300'
-                      }`}
-                    >
-                      {monthTotals[m.key] ? fmtINR(monthTotals[m.key]) : '–'}
-                    </td>
-                  ))}
+                  {viewMode === 'monthly'
+                    ? fyMonths.map((m) => (
+                        <td
+                          key={m.key}
+                          className={`px-3 py-3 text-right text-sm font-bold whitespace-nowrap ${
+                            monthTotals[m.key] ? 'text-slate-800' : 'text-slate-300'
+                          }`}
+                        >
+                          {monthTotals[m.key] ? fmtINR(monthTotals[m.key]) : '–'}
+                        </td>
+                      ))
+                    : fyQuarters.map((q) => (
+                        <td
+                          key={q.key}
+                          className={`px-3 py-3 text-right text-sm font-bold whitespace-nowrap ${
+                            quarterTotals[q.key] ? 'text-slate-800' : 'text-slate-300'
+                          }`}
+                        >
+                          {quarterTotals[q.key] ? fmtINR(quarterTotals[q.key]) : '–'}
+                        </td>
+                      ))}
                 </tr>
               </tfoot>
             </table>

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Settings as SettingsIcon, Plus, Trash2, Check, RotateCcw } from 'lucide-react';
+import { Settings as SettingsIcon, Plus, Trash2, Check, RotateCcw, Mail } from 'lucide-react';
 import {
   getTaxonomy,
   saveTaxonomy,
@@ -7,6 +7,7 @@ import {
   categoryDotStyle,
   type CategoryTaxonomy,
 } from '../lib/categories';
+import { getBillingAccounts, saveBillingAccounts, type BillingAccount } from '../lib/accounts';
 
 export default function Settings() {
   const [taxonomy, setTaxonomy] = useState<CategoryTaxonomy>(getTaxonomy);
@@ -91,6 +92,32 @@ export default function Settings() {
   }
 
   const subcategories = selectedCat ? (taxonomy[selectedCat] ?? []) : [];
+
+  // ── Billing Accounts ──
+  const [accounts, setAccounts] = useState<BillingAccount[]>(getBillingAccounts);
+  const [newAccEmail, setNewAccEmail] = useState('');
+  const [newAccLabel, setNewAccLabel] = useState('');
+  const [accSaved, setAccSaved] = useState(false);
+
+  function commitAccounts(updated: BillingAccount[]) {
+    setAccounts(updated);
+    saveBillingAccounts(updated);
+    setAccSaved(true);
+    setTimeout(() => setAccSaved(false), 2000);
+  }
+
+  function addAccount() {
+    const email = newAccEmail.trim().toLowerCase();
+    if (!email) return;
+    if (accounts.some(a => a.email === email)) return;
+    commitAccounts([...accounts, { email, label: newAccLabel.trim() || undefined }]);
+    setNewAccEmail('');
+    setNewAccLabel('');
+  }
+
+  function deleteAccount(email: string) {
+    commitAccounts(accounts.filter(a => a.email !== email));
+  }
 
   return (
     <div className="p-8">
@@ -273,6 +300,75 @@ export default function Settings() {
                 Select a category to manage its subcategories
               </div>
             )}
+          </div>
+        </div>
+      </div>
+
+      {/* Billing Accounts */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden mb-5">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+          <div>
+            <h2 className="font-semibold text-slate-900">Billing Accounts</h2>
+            <p className="text-sm text-slate-500 mt-0.5">
+              Email accounts used for subscriptions — every subscription must be linked to one
+            </p>
+          </div>
+          {accSaved && (
+            <span className="flex items-center gap-1 text-xs text-emerald-600 font-medium bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-200">
+              <Check size={11} /> Saved
+            </span>
+          )}
+        </div>
+
+        <div className="p-5 space-y-2">
+          {accounts.map(acc => (
+            <div key={acc.email} className="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-slate-50 group">
+              <Mail size={14} className="text-slate-400 shrink-0" />
+              <span className="text-sm font-medium text-slate-800">{acc.email}</span>
+              {acc.label && <span className="text-xs text-slate-400">({acc.label})</span>}
+              <div className="flex-1" />
+              <button
+                type="button"
+                onClick={() => deleteAccount(acc.email)}
+                className="opacity-0 group-hover:opacity-100 w-6 h-6 flex items-center justify-center rounded text-slate-400 hover:text-red-500 hover:bg-red-50 transition-all shrink-0"
+                title="Remove account"
+              >
+                <Trash2 size={12} />
+              </button>
+            </div>
+          ))}
+          {accounts.length === 0 && (
+            <p className="text-sm text-slate-400 text-center py-4">No billing accounts yet</p>
+          )}
+        </div>
+
+        <div className="px-5 pb-5">
+          <div className="flex gap-2">
+            <input
+              type="email"
+              value={newAccEmail}
+              onChange={e => setNewAccEmail(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && addAccount()}
+              placeholder="Email address"
+              className="flex-1 text-xs border border-slate-200 rounded-lg px-2.5 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 placeholder-slate-300"
+            />
+            <input
+              type="text"
+              value={newAccLabel}
+              onChange={e => setNewAccLabel(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && addAccount()}
+              placeholder="Label (optional)"
+              className="w-40 text-xs border border-slate-200 rounded-lg px-2.5 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 placeholder-slate-300"
+            />
+            <button
+              type="button"
+              onClick={addAccount}
+              disabled={!newAccEmail.trim()}
+              className="w-8 h-8 flex items-center justify-center bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-40 transition-colors shrink-0"
+              title="Add account"
+            >
+              <Plus size={14} />
+            </button>
           </div>
         </div>
       </div>
