@@ -141,6 +141,21 @@ function statusBadge(status: string) {
 
 // ── Fuzzy vendor matching ─────────────────────────────────────────────────────
 
+/** Returns ALL subscriptions whose vendor name fuzzy-matches the extracted name. */
+function fuzzyMatchAll(extractedVendorName: string, subscriptions: Subscription[]): Subscription[] {
+  if (!extractedVendorName) return [];
+  const needle = extractedVendorName.toLowerCase().trim();
+  const needleTokens = new Set(needle.split(/\s+/));
+  return subscriptions.filter(s => {
+    const subName = s.vendor_name.toLowerCase().trim();
+    if (subName === needle) return true;
+    if (needle.includes(subName) || subName.includes(needle)) return true;
+    const subTokens = new Set(subName.split(/\s+/));
+    const shared = [...needleTokens].filter(t => subTokens.has(t)).length;
+    return shared / Math.max(needleTokens.size, subTokens.size) >= 0.5;
+  });
+}
+
 function fuzzyMatchSubscription(
   extractedVendorName: string,
   subscriptions: Subscription[],
@@ -237,12 +252,14 @@ export default function Subscriptions() {
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [queueItems, setQueueItems] = useState<{
     fileName: string;
-    status: 'pending' | 'processing' | 'saved' | 'error' | 'needs_account';
+    status: 'pending' | 'processing' | 'saved' | 'error' | 'needs_account' | 'needs_subscription';
     subName?: string;
     error?: string;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     deferred?: { extracted: any; file: File; vendorName: string };
     selectedAccount?: string;
+    matchedSubs?: Subscription[];
+    selectedSubId?: string;
   }[]>([]);
   const [queueBusy, setQueueBusy] = useState(false);
 
@@ -523,7 +540,18 @@ export default function Subscriptions() {
         const extracted = await extractInvoiceData(file);
         const vendorName = extracted.vendor_name || 'Unknown Vendor';
         const buyerEmail = extracted.buyer_email || null;
-        const matched = fuzzyMatchSubscription(vendorName, liveSubs, buyerEmail);
+        const allMatches = fuzzyMatchAll(vendorName, liveSubs);
+
+        // Multiple subscriptions match this vendor → ask user to pick
+        if (allMatches.length > 1) {
+          setQueueItems(prev => prev.map((item, idx) => idx === i
+            ? { ...item, status: 'needs_subscription' as const, subName: vendorName, deferred: { extracted, file, vendorName }, matchedSubs: allMatches, selectedSubId: allMatches[0].id }
+            : item,
+          ));
+          continue;
+        }
+
+        const matched = allMatches.length === 1 ? allMatches[0] : fuzzyMatchSubscription(vendorName, liveSubs, buyerEmail);
 
         const extractedCurrency = extracted.currency ?? 'USD';
         const subtotal = extracted.subtotal ?? 0;
@@ -714,6 +742,41 @@ export default function Subscriptions() {
     }
   }
 
+  // Save a deferred queue item after user picks a specific subscription
+  async function saveDeferredToSubscription(idx: number) {
+    const item = queueItems[idx];
+    if (!item?.deferred || !item.selectedSubId) return;
+    const { extracted, file } = item.deferred;
+    const targetSub = subs.find(s => s.id === item.selectedSubId);
+    if (!targetSub) return;
+    setQueueItems(prev => prev.map((q, i) => i === idx ? { ...q, status: 'processing' as const } : q));
+    try {
+      const extractedCurrency = extracted.currency ?? 'USD';
+      const subtotal = extracted.subtotal ?? 0;
+      const taxAmt = extracted.tax_amount ?? 0;
+      const baseAmount = subtotal > 0 ? subtotal : Math.max(0, (extracted.total_amount ?? 0) - taxAmt);
+      const extractedTotal = extracted.total_amount ?? (baseAmount + taxAmt);
+      const exchangeRate = extractedCurrency === 'INR' ? 1 : (targetSub.exchange_rate ?? 87);
+      const inrAmt = extractedTotal * exchangeRate;
+      const savedInv = await saveSubscriptionInvoice({
+        subscription_id: targetSub.id,
+        invoice_number: extracted.invoice_number || undefined,
+        invoice_date: extracted.invoice_date || undefined,
+        billing_period_from: extracted.billing_period_from || undefined,
+        billing_period_to: extracted.billing_period_to || undefined,
+        currency: extractedCurrency, amount: baseAmount, tax_amount: taxAmt,
+        total_amount: extractedTotal, exchange_rate: exchangeRate, inr_amount: inrAmt,
+        file_name: file.name,
+      });
+      try { const url = await uploadSubscriptionInvoiceFile(file, savedInv.id); if (url) { await saveSubscriptionInvoice({ id: savedInv.id, file_url: url }); savedInv.file_url = url; } } catch {}
+      setInvoicesMap(prev => ({ ...prev, [targetSub.id]: [savedInv, ...(prev[targetSub.id] || [])] }));
+      setExpandedId(targetSub.id);
+      setQueueItems(prev => prev.map((q, i) => i === idx ? { ...q, status: 'saved' as const, subName: `${targetSub.vendor_name} (${targetSub.account_email || 'no account'})`, deferred: undefined } : q));
+    } catch (err) {
+      setQueueItems(prev => prev.map((q, i) => i === idx ? { ...q, status: 'error' as const, error: err instanceof Error ? err.message : 'Failed', deferred: undefined } : q));
+    }
+  }
+
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop: onTopLevelDrop,
     accept: { 'application/pdf': ['.pdf'], 'image/*': ['.jpg', '.jpeg', '.png'] },
@@ -852,11 +915,12 @@ export default function Subscriptions() {
           <div className="divide-y divide-slate-100">
             {queueItems.map((item, i) => (
               <div key={i} className="flex items-center gap-3 px-4 py-2.5 text-xs">
-                {item.status === 'pending'        && <div className="w-3.5 h-3.5 rounded-full border-2 border-slate-200 shrink-0" />}
-                {item.status === 'processing'     && <Loader2 size={14} className="text-indigo-500 animate-spin shrink-0" />}
-                {item.status === 'saved'          && <CheckCircle size={14} className="text-emerald-500 shrink-0" />}
-                {item.status === 'error'          && <AlertCircle size={14} className="text-red-500 shrink-0" />}
-                {item.status === 'needs_account'  && <AlertCircle size={14} className="text-amber-500 shrink-0" />}
+                {item.status === 'pending'             && <div className="w-3.5 h-3.5 rounded-full border-2 border-slate-200 shrink-0" />}
+                {item.status === 'processing'          && <Loader2 size={14} className="text-indigo-500 animate-spin shrink-0" />}
+                {item.status === 'saved'               && <CheckCircle size={14} className="text-emerald-500 shrink-0" />}
+                {item.status === 'error'               && <AlertCircle size={14} className="text-red-500 shrink-0" />}
+                {item.status === 'needs_account'       && <AlertCircle size={14} className="text-amber-500 shrink-0" />}
+                {item.status === 'needs_subscription'  && <AlertCircle size={14} className="text-indigo-500 shrink-0" />}
                 <span className="text-slate-600 flex-1 truncate">{item.fileName}</span>
                 {item.status === 'saved' && <span className="text-emerald-600 font-medium shrink-0">{item.subName}</span>}
                 {item.status === 'error' && <span className="text-red-500 shrink-0">{item.error}</span>}
@@ -877,6 +941,30 @@ export default function Subscriptions() {
                       onClick={() => saveDeferredItem(i)}
                       className="w-5 h-5 flex items-center justify-center rounded bg-amber-100 hover:bg-amber-200 text-amber-700"
                       title="Save with selected account"
+                    >
+                      <Check size={10} />
+                    </button>
+                  </div>
+                )}
+                {item.status === 'needs_subscription' && (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <span className="text-indigo-600 font-medium text-[11px]">Which account?</span>
+                    <select
+                      value={item.selectedSubId || ''}
+                      onChange={e => setQueueItems(prev => prev.map((q, j) => j === i ? { ...q, selectedSubId: e.target.value } : q))}
+                      className="text-[11px] border border-indigo-300 rounded px-1.5 py-0.5 focus:outline-none focus:ring-1 focus:ring-indigo-400 max-w-[220px]"
+                    >
+                      {(item.matchedSubs || []).map(s => (
+                        <option key={s.id} value={s.id}>
+                          {s.vendor_name}{s.account_email ? ` · ${s.account_email}` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => saveDeferredToSubscription(i)}
+                      className="w-5 h-5 flex items-center justify-center rounded bg-indigo-100 hover:bg-indigo-200 text-indigo-700"
+                      title="Save to selected subscription"
                     >
                       <Check size={10} />
                     </button>
