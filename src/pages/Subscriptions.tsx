@@ -638,6 +638,22 @@ export default function Subscriptions() {
       const accountSubs = subs.filter(s => s.account_email?.toLowerCase() === accountEmail.toLowerCase());
       const matched = fuzzyMatchSubscription(vendorName, accountSubs, accountEmail);
       if (matched) {
+        // Dedup: check for duplicate invoice_number before saving
+        let existingInvs = invoicesMap[matched.id];
+        if (!existingInvs) {
+          try {
+            existingInvs = await getSubscriptionInvoices(matched.id);
+            setInvoicesMap(prev => ({ ...prev, [matched.id]: existingInvs! }));
+          } catch { existingInvs = []; }
+        }
+        const extractedInvNum = extracted.invoice_number?.trim();
+        if (extractedInvNum && existingInvs.some(inv => inv.invoice_number === extractedInvNum)) {
+          setQueueItems(prev => prev.map((q, i) => i === idx
+            ? { ...q, status: 'saved' as const, subName: `${matched.vendor_name} (duplicate skipped)`, deferred: undefined }
+            : q,
+          ));
+          return;
+        }
         const exchangeRate = extractedCurrency === 'INR' ? 1 : (matched.exchange_rate ?? 87);
         const inrAmt = extractedTotal * exchangeRate;
         const savedInv = await saveSubscriptionInvoice({
