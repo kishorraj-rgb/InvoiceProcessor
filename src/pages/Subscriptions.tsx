@@ -35,6 +35,7 @@ import { extractInvoiceData } from '../lib/claude';
 import { getBillingAccounts, type BillingAccount } from '../lib/accounts';
 import type { Subscription, SubscriptionInvoice } from '../types';
 import SubscriptionTabBar from '../components/SubscriptionTabBar';
+import ConfirmDialog from '../components/ui/ConfirmDialog';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -226,6 +227,25 @@ export default function Subscriptions() {
   // Billing accounts (localStorage)
   const [billingAccounts, setBillingAccounts] = useState<BillingAccount[]>(getBillingAccounts);
 
+  // Alert/confirm dialog (replaces native alert())
+  const [dialog, setDialog] = useState<{
+    open: boolean;
+    title: string;
+    message: string;
+    mode: 'alert' | 'confirm';
+    variant: 'danger' | 'default';
+    actionLabel?: string;
+    onConfirm?: () => void;
+  }>({ open: false, title: '', message: '', mode: 'alert', variant: 'default' });
+
+  function showAlert(title: string, message: string) {
+    setDialog({ open: true, title, message, mode: 'alert', variant: 'default' });
+  }
+
+  function closeDialog() {
+    setDialog(prev => ({ ...prev, open: false }));
+  }
+
   useEffect(() => {
     const onUpdate = () => setBillingAccounts(getBillingAccounts());
     window.addEventListener('ip-accounts-updated', onUpdate);
@@ -364,7 +384,7 @@ export default function Subscriptions() {
       await deleteSubscription(id);
       setSubs(prev => prev.filter(s => s.id !== id));
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to delete');
+      showAlert('Delete Failed', err instanceof Error ? err.message : 'Failed to delete subscription.');
     }
     setDeletingSubId(null);
   }
@@ -430,7 +450,7 @@ export default function Subscriptions() {
       setInvoicesMap(prev => ({ ...prev, [subId]: [saved, ...(prev[subId] || [])] }));
       setShowInvoiceForm(null);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to save invoice');
+      showAlert('Save Failed', err instanceof Error ? err.message : 'Failed to save invoice.');
     } finally {
       setSavingInv(false);
     }
@@ -441,7 +461,7 @@ export default function Subscriptions() {
       await deleteSubscriptionInvoice(invId);
       setInvoicesMap(prev => ({ ...prev, [subId]: (prev[subId] || []).filter(i => i.id !== invId) }));
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to delete');
+      showAlert('Delete Failed', err instanceof Error ? err.message : 'Failed to delete invoice.');
     }
     setDeletingInvId(null);
   }
@@ -458,7 +478,7 @@ export default function Subscriptions() {
         return { ...prev, [fromSubId]: fromList, [toSubId]: toList };
       });
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to reassign');
+      showAlert('Reassign Failed', err instanceof Error ? err.message : 'Failed to reassign invoice.');
     }
     setReassigningInvId(null);
     setReassignTargetSubId('');
@@ -1372,6 +1392,16 @@ export default function Subscriptions() {
           </div>
         </div>
       )}
+      <ConfirmDialog
+        open={dialog.open}
+        title={dialog.title}
+        message={dialog.message}
+        mode={dialog.mode}
+        variant={dialog.variant}
+        actionLabel={dialog.actionLabel}
+        onConfirm={() => { dialog.onConfirm?.(); closeDialog(); }}
+        onCancel={closeDialog}
+      />
     </div>
   );
 }
