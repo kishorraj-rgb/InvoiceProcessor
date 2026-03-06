@@ -609,63 +609,23 @@ export default function Subscriptions() {
           ));
         } else {
           // ── Auto-create new subscription + first invoice ──
-          // If multiple accounts exist, always ask user to pick one
-          if (billingAccounts.length > 1) {
+          // No billing accounts configured → block
+          if (billingAccounts.length === 0) {
             setQueueItems(prev => prev.map((item, idx) => idx === i
-              ? { ...item, status: 'needs_account' as const, subName: vendorName, deferred: { extracted, file, vendorName }, selectedAccount: billingAccounts[0]?.email }
+              ? { ...item, status: 'error' as const, error: 'No billing accounts configured — add one in Settings first' }
               : item,
             ));
             continue;
           }
-          const exchangeRate = extractedCurrency === 'INR' ? 1 : 87;
-          const inrAmt = extractedTotal * exchangeRate;
-          const computedTaxRate = subtotal > 0 ? parseFloat(((taxAmt / subtotal) * 100).toFixed(2)) : 0;
-          const subPayload: Partial<Subscription> = {
-            vendor_name: vendorName,
-            service_name: vendorName,
-            billing_cycle: 'monthly',
-            currency: extractedCurrency,
-            amount: baseAmount,
-            tax_rate: computedTaxRate,
-            tax_amount: taxAmt,
-            total_amount: extractedTotal,
-            exchange_rate: exchangeRate,
-            inr_amount: inrAmt,
-            account_email: buyerEmail || billingAccounts[0]?.email || undefined,
-            status: 'active',
-            start_date: extracted.invoice_date || undefined,
-          };
-          const savedSub = await saveSubscription(subPayload);
-          liveSubs = [savedSub, ...liveSubs];
-          setSubs(prev => [savedSub, ...prev]);
-          const invPayload: Partial<SubscriptionInvoice> = {
-            subscription_id: savedSub.id,
-            invoice_number: extracted.invoice_number || undefined,
-            invoice_date: extracted.invoice_date || undefined,
-            billing_period_from: extracted.billing_period_from || undefined,
-            billing_period_to: extracted.billing_period_to || undefined,
-            currency: extractedCurrency,
-            amount: baseAmount,
-            tax_amount: taxAmt,
-            total_amount: extractedTotal,
-            exchange_rate: exchangeRate,
-            inr_amount: inrAmt,
-            file_name: file.name,
-          };
-          const savedInv = await saveSubscriptionInvoice(invPayload);
-          try {
-            const url = await uploadSubscriptionInvoiceFile(file, savedInv.id);
-            if (url) {
-              await saveSubscriptionInvoice({ id: savedInv.id, file_url: url });
-              savedInv.file_url = url;
-            }
-          } catch { /* upload non-fatal */ }
-          setInvoicesMap(prev => ({ ...prev, [savedSub.id]: [savedInv] }));
-          if (!firstSavedSubId) firstSavedSubId = savedSub.id;
+          // Always ask user to pick an account; pre-select extracted buyer email if it matches a known account
+          const preselect = (buyerEmail && billingAccounts.some(a => a.email.toLowerCase() === buyerEmail.toLowerCase()))
+            ? buyerEmail
+            : billingAccounts[0]?.email;
           setQueueItems(prev => prev.map((item, idx) => idx === i
-            ? { ...item, status: 'saved', subName: `New: ${vendorName}` }
+            ? { ...item, status: 'needs_account' as const, subName: vendorName, deferred: { extracted, file, vendorName }, selectedAccount: preselect }
             : item,
           ));
+          continue;
         }
       } catch (err) {
         setQueueItems(prev => prev.map((item, idx) => idx === i
