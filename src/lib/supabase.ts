@@ -294,6 +294,24 @@ export async function getInvoices(): Promise<Invoice[]> {
 }
 
 export async function createInvoice(invoice: Partial<Invoice> & { vendor_name: string }): Promise<Invoice> {
+  // Dedup: skip if same invoice_number already exists for this vendor
+  const invNum = invoice.invoice_number?.trim();
+  if (invNum) {
+    let query = supabase
+      .from('invoices')
+      .select('id', { count: 'exact', head: true })
+      .eq('invoice_number', invNum);
+    if (invoice.vendor_id) {
+      query = query.eq('vendor_id', invoice.vendor_id);
+    } else {
+      query = query.eq('vendor_name', invoice.vendor_name);
+    }
+    const { count } = await query;
+    if ((count ?? 0) > 0) {
+      throw new Error(`Duplicate invoice: ${invNum} already exists for this vendor`);
+    }
+  }
+
   const { data, error } = await supabase
     .from('invoices')
     .insert({
