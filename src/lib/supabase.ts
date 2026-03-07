@@ -13,6 +13,26 @@ export const supabase = createClient(
   supabaseAnonKey || 'placeholder'
 );
 
+// ── Vendor normalization helpers ──────────────────────────────────────────────
+
+/** Strip whitespace & non-alphanumeric chars, uppercase. Returns '' if falsy. */
+function normalizeGstin(raw?: string | null): string {
+  if (!raw) return '';
+  return raw.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+}
+
+/** Extract PAN (chars 3-12) from a 15-char GSTIN. Returns '' if invalid length. */
+function panFromGstin(gstin: string): string {
+  const norm = normalizeGstin(gstin);
+  return norm.length === 15 ? norm.slice(2, 12) : '';
+}
+
+/** Normalize a PAN: strip non-alphanumeric, uppercase. */
+function normalizePan(raw?: string | null): string {
+  if (!raw) return '';
+  return raw.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+}
+
 // Vendor operations
 export async function getVendors(): Promise<Vendor[]> {
   const { data, error } = await supabase
@@ -24,13 +44,16 @@ export async function getVendors(): Promise<Vendor[]> {
 }
 
 export async function upsertVendor(vendor: Partial<Vendor> & { vendor_name: string }): Promise<Vendor> {
-  // Only pass known vendor columns (avoids sending invoice fields accidentally)
+  const normGstin = normalizeGstin(vendor.gstin);
+  const normPan = normalizePan(vendor.vendor_pan) || panFromGstin(vendor.gstin || '');
+
+  // Store normalized values
   const vendorFields = {
     vendor_name: vendor.vendor_name,
     vendor_address: vendor.vendor_address,
-    gstin: vendor.gstin,
+    gstin: normGstin || vendor.gstin || undefined,
     place_of_supply: vendor.place_of_supply,
-    vendor_pan: vendor.vendor_pan,
+    vendor_pan: normPan || vendor.vendor_pan || undefined,
     vendor_contact_email: vendor.vendor_contact_email,
     beneficiary_name: vendor.beneficiary_name,
     bank_name: vendor.bank_name,
@@ -40,27 +63,40 @@ export async function upsertVendor(vendor: Partial<Vendor> & { vendor_name: stri
     swift_code: vendor.swift_code,
   };
 
-  // 1. Try GSTIN match first (reliable even when OCR mis-reads the name)
-  if (vendor.gstin) {
-    const { data: byGstin } = await supabase
+  // 1. Normalized GSTIN match (handles whitespace, casing, OCR artifacts)
+  if (normGstin && normGstin.length === 15) {
+    const { data: gstinCandidates } = await supabase
       .from('vendors')
       .select('*')
-      .eq('gstin', vendor.gstin)
-      .single();
+      .not('gstin', 'is', null);
+
+    const byGstin = gstinCandidates?.find(
+      v => normalizeGstin(v.gstin) === normGstin
+    );
 
     if (byGstin) {
-      const { data, error } = await supabase
-        .from('vendors')
-        .update({ ...vendorFields, updated_at: new Date().toISOString() })
-        .eq('id', byGstin.id)
-        .select()
-        .single();
-      if (error) throw error;
-      return data;
+      return await smartUpdateVendor(byGstin, vendorFields);
     }
   }
 
-  // 2. Fallback: case-insensitive name match
+  // 2. PAN match (derived from GSTIN or standalone vendor_pan)
+  if (normPan && normPan.length === 10) {
+    const { data: panCandidates } = await supabase
+      .from('vendors')
+      .select('*')
+      .or('vendor_pan.neq.,gstin.neq.');
+
+    const byPan = panCandidates?.find(v => {
+      const vPan = normalizePan(v.vendor_pan) || panFromGstin(v.gstin || '');
+      return vPan === normPan;
+    });
+
+    if (byPan) {
+      return await smartUpdateVendor(byPan, vendorFields);
+    }
+  }
+
+  // 3. Case-insensitive name match (fallback)
   const { data: existing } = await supabase
     .from('vendors')
     .select('*')
@@ -68,21 +104,35 @@ export async function upsertVendor(vendor: Partial<Vendor> & { vendor_name: stri
     .single();
 
   if (existing) {
-    const { data, error } = await supabase
-      .from('vendors')
-      .update({ ...vendorFields, updated_at: new Date().toISOString() })
-      .eq('id', existing.id)
-      .select()
-      .single();
-    if (error) throw error;
-    return data;
+    return await smartUpdateVendor(existing, vendorFields);
   }
 
-  // 3. New vendor
+  // 4. New vendor
   const vendorCode = 'V' + String(Date.now()).slice(-6);
   const { data, error } = await supabase
     .from('vendors')
     .insert({ vendor_code: vendorCode, ...vendorFields })
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+/** Update existing vendor — only overwrite fields that have non-empty incoming values */
+async function smartUpdateVendor(
+  existing: Vendor,
+  incoming: Record<string, unknown>,
+): Promise<Vendor> {
+  const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  for (const [key, val] of Object.entries(incoming)) {
+    if (val !== undefined && val !== null && val !== '') {
+      updates[key] = val;
+    }
+  }
+  const { data, error } = await supabase
+    .from('vendors')
+    .update(updates)
+    .eq('id', existing.id)
     .select()
     .single();
   if (error) throw error;
@@ -114,6 +164,123 @@ export async function updateVendorName(id: string, name: string): Promise<void> 
     .update({ vendor_name: name, updated_at: new Date().toISOString() })
     .eq('id', id);
   if (error) throw error;
+}
+
+// ── Vendor duplicate detection & merge ───────────────────────────────────────
+
+export interface DuplicateGroup {
+  key: string;
+  matchType: 'gstin' | 'pan' | 'name';
+  vendors: Vendor[];
+}
+
+export async function findDuplicateVendors(): Promise<DuplicateGroup[]> {
+  const vendors = await getVendors();
+  const groups: DuplicateGroup[] = [];
+  const seen = new Set<string>();
+
+  // Pass 1: Group by normalized GSTIN
+  const gstinMap = new Map<string, Vendor[]>();
+  for (const v of vendors) {
+    const norm = normalizeGstin(v.gstin);
+    if (norm && norm.length >= 10) {
+      if (!gstinMap.has(norm)) gstinMap.set(norm, []);
+      gstinMap.get(norm)!.push(v);
+    }
+  }
+  for (const [gstin, vList] of gstinMap) {
+    if (vList.length > 1) {
+      groups.push({ key: `GSTIN: ${gstin}`, matchType: 'gstin', vendors: vList });
+      vList.forEach(v => seen.add(v.id));
+    }
+  }
+
+  // Pass 2: Group by PAN (for vendors not already grouped)
+  const panMap = new Map<string, Vendor[]>();
+  for (const v of vendors) {
+    if (seen.has(v.id)) continue;
+    const pan = normalizePan(v.vendor_pan) || panFromGstin(v.gstin || '');
+    if (pan && pan.length === 10) {
+      if (!panMap.has(pan)) panMap.set(pan, []);
+      panMap.get(pan)!.push(v);
+    }
+  }
+  for (const [pan, vList] of panMap) {
+    if (vList.length > 1) {
+      groups.push({ key: `PAN: ${pan}`, matchType: 'pan', vendors: vList });
+      vList.forEach(v => seen.add(v.id));
+    }
+  }
+
+  // Pass 3: Similar names (token overlap >= 60%) for remaining vendors
+  const remaining = vendors.filter(v => !seen.has(v.id));
+  const nameGroups: Vendor[][] = [];
+  const nameUsed = new Set<string>();
+
+  for (const v of remaining) {
+    if (nameUsed.has(v.id)) continue;
+    const tokens = v.vendor_name.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
+    const group = [v];
+
+    for (const other of remaining) {
+      if (other.id === v.id || nameUsed.has(other.id)) continue;
+      const otherTokens = other.vendor_name.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
+      const shared = tokens.filter(t => otherTokens.includes(t)).length;
+      const similarity = shared / Math.max(tokens.length, otherTokens.length);
+      if (similarity >= 0.6) {
+        group.push(other);
+        nameUsed.add(other.id);
+      }
+    }
+
+    if (group.length > 1) {
+      nameUsed.add(v.id);
+      nameGroups.push(group);
+    }
+  }
+
+  for (const vList of nameGroups) {
+    groups.push({ key: `Name: ${vList[0].vendor_name}`, matchType: 'name', vendors: vList });
+  }
+
+  return groups;
+}
+
+export async function mergeVendors(targetId: string, sourceIds: string[]): Promise<void> {
+  // Get target vendor info for denormalized fields on invoices
+  const { data: target } = await supabase
+    .from('vendors')
+    .select('vendor_name, gstin')
+    .eq('id', targetId)
+    .single();
+
+  if (!target) throw new Error('Target vendor not found');
+
+  for (const srcId of sourceIds) {
+    // Reassign all invoices from source to target
+    const { error: updateErr } = await supabase
+      .from('invoices')
+      .update({
+        vendor_id: targetId,
+        vendor_name: target.vendor_name,
+        vendor_gstin: target.gstin || undefined,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('vendor_id', srcId);
+
+    if (updateErr) throw updateErr;
+
+    // Delete the source vendor
+    const { error: deleteErr } = await supabase
+      .from('vendors')
+      .delete()
+      .eq('id', srcId);
+
+    if (deleteErr) throw deleteErr;
+  }
+
+  // Recalculate stats for the target vendor
+  await recalculateVendorStats(targetId);
 }
 
 // Invoice operations

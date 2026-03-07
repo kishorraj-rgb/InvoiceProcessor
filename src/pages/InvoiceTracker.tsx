@@ -48,8 +48,9 @@ function formatDateShort(d?: string | null) {
   return { day, year: String(year) };
 }
 
-function getAgeDays(createdAt: string) {
-  return Math.floor((Date.now() - new Date(createdAt).getTime()) / 86400000);
+function getAgeDays(invoiceDate?: string) {
+  if (!invoiceDate) return 0;
+  return Math.max(0, Math.floor((Date.now() - new Date(invoiceDate).getTime()) / 86400000));
 }
 
 function getDescription(inv: Invoice): string {
@@ -1006,7 +1007,7 @@ export default function InvoiceTracker() {
       else if (sortKey === 'vendor_name') { va = a.vendor_name; vb = b.vendor_name; }
       else if (sortKey === 'total_amount') { va = a.total_amount || 0; vb = b.total_amount || 0; }
       else if (sortKey === 'status') { va = a.status; vb = b.status; }
-      else if (sortKey === 'age') { va = getAgeDays(a.created_at); vb = getAgeDays(b.created_at); }
+      else if (sortKey === 'age') { va = getAgeDays(a.invoice_date); vb = getAgeDays(b.invoice_date); }
       if (va < vb) return sortDir === 'asc' ? -1 : 1;
       if (va > vb) return sortDir === 'asc' ? 1 : -1;
       return 0;
@@ -1214,8 +1215,8 @@ export default function InvoiceTracker() {
                     <th className="text-left px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap">Category</th>
                     <SortTh label="Status" sortKey="status"        current={sortKey} dir={sortDir} onSort={handleSort} />
                     <SortTh label="Amount" sortKey="total_amount"  current={sortKey} dir={sortDir} onSort={handleSort} align="right" />
-                    <th className="text-right px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap">Paid</th>
-                    <th className="text-right px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap">Balance</th>
+                    <th className="text-right px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap min-w-[100px]">Paid</th>
+                    <th className="text-right px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap min-w-[100px]">Balance</th>
                     <SortTh label="Age"    sortKey="age"           current={sortKey} dir={sortDir} onSort={handleSort} align="right" />
                     <th className="text-center px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap">Invoice</th>
                     <th className="text-center px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap">Delete</th>
@@ -1240,7 +1241,7 @@ export default function InvoiceTracker() {
                           : invoice.total_amount)
                       : invoice.total_amount;
 
-                    const age = getAgeDays(invoice.created_at);
+                    const age = getAgeDays(invoice.invoice_date);
                     const dateFormatted = formatDateShort(invoice.invoice_date);
 
                     return (

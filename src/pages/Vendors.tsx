@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
-import { Users, Search, Building2, CreditCard, Hash, RefreshCw, Pencil, Trash2, Check, X } from 'lucide-react';
-import { getVendors, deleteVendor, updateVendorName } from '../lib/supabase';
+import { Users, Search, Building2, CreditCard, Hash, RefreshCw, Pencil, Trash2, Check, X, GitMerge, CheckCircle, ChevronRight } from 'lucide-react';
+import { getVendors, deleteVendor, updateVendorName, findDuplicateVendors, mergeVendors } from '../lib/supabase';
+import type { DuplicateGroup } from '../lib/supabase';
 import type { Vendor } from '../types';
 
 function formatCurrency(amount: number) {
@@ -36,6 +37,14 @@ export default function Vendors() {
   // Inline delete confirm
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+
+  // Merge mode
+  const [mergeMode, setMergeMode] = useState(false);
+  const [duplicateGroups, setDuplicateGroups] = useState<DuplicateGroup[]>([]);
+  const [scanningDupes, setScanningDupes] = useState(false);
+  const [mergeTargets, setMergeTargets] = useState<Record<string, string>>({}); // groupKey → vendorId
+  const [mergingGroup, setMergingGroup] = useState<string | null>(null);
+  const [mergeConfirm, setMergeConfirm] = useState<string | null>(null); // groupKey to confirm
 
   async function load() {
     setLoading(true);
@@ -100,6 +109,47 @@ export default function Vendors() {
     }
   }
 
+  async function scanForDuplicates() {
+    setScanningDupes(true);
+    try {
+      const groups = await findDuplicateVendors();
+      setDuplicateGroups(groups);
+      // Auto-select the vendor with most invoices as primary in each group
+      const targets: Record<string, string> = {};
+      for (const g of groups) {
+        const best = [...g.vendors].sort((a, b) => (b.invoice_count || 0) - (a.invoice_count || 0))[0];
+        targets[g.key] = best.id;
+      }
+      setMergeTargets(targets);
+      setMergeMode(true);
+    } finally {
+      setScanningDupes(false);
+    }
+  }
+
+  function exitMergeMode() {
+    setMergeMode(false);
+    setDuplicateGroups([]);
+    setMergeTargets({});
+    setMergeConfirm(null);
+    setMergingGroup(null);
+  }
+
+  async function executeMerge(group: DuplicateGroup) {
+    const targetId = mergeTargets[group.key];
+    if (!targetId) return;
+    const sourceIds = group.vendors.filter(v => v.id !== targetId).map(v => v.id);
+    setMergingGroup(group.key);
+    try {
+      await mergeVendors(targetId, sourceIds);
+      setDuplicateGroups(prev => prev.filter(g => g.key !== group.key));
+      setMergeConfirm(null);
+      await load();
+    } finally {
+      setMergingGroup(null);
+    }
+  }
+
   const filtered = vendors.filter(v =>
     v.vendor_name.toLowerCase().includes(search.toLowerCase()) ||
     (v.gstin || '').toLowerCase().includes(search.toLowerCase()) ||
@@ -116,13 +166,27 @@ export default function Vendors() {
             Automatically built from processed invoices · {vendors.length} vendors
           </p>
         </div>
-        <button
-          onClick={load}
-          className="flex items-center gap-2 px-3 py-2 text-sm text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors"
-        >
-          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={mergeMode ? exitMergeMode : scanForDuplicates}
+            disabled={scanningDupes}
+            className={`flex items-center gap-2 px-3 py-2 text-sm border rounded-lg transition-colors ${
+              mergeMode
+                ? 'text-slate-600 border-slate-200 hover:bg-slate-50'
+                : 'text-amber-700 border-amber-200 hover:bg-amber-50'
+            }`}
+          >
+            <GitMerge size={14} className={scanningDupes ? 'animate-spin' : ''} />
+            {mergeMode ? 'Exit Merge Mode' : scanningDupes ? 'Scanning…' : 'Find Duplicates'}
+          </button>
+          <button
+            onClick={load}
+            className="flex items-center gap-2 px-3 py-2 text-sm text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors"
+          >
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* Search */}
@@ -137,7 +201,134 @@ export default function Vendors() {
         />
       </div>
 
-      {loading ? (
+      {/* Merge Mode UI */}
+      {mergeMode && (
+        <div className="mb-6">
+          <div className="flex items-center gap-2 mb-4 px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg">
+            <GitMerge size={16} className="text-amber-600" />
+            <span className="text-sm font-medium text-amber-800">
+              Merge Mode — {duplicateGroups.length} duplicate group{duplicateGroups.length !== 1 ? 's' : ''} found
+            </span>
+          </div>
+
+          {duplicateGroups.length === 0 ? (
+            <div className="text-center py-16">
+              <CheckCircle size={40} className="text-emerald-400 mx-auto mb-3" />
+              <p className="text-lg font-semibold text-slate-700">No duplicates found</p>
+              <p className="text-sm text-slate-400 mt-1">All vendors have unique GSTINs, PANs, and names</p>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              {duplicateGroups.map(group => {
+                const targetId = mergeTargets[group.key];
+                const targetVendor = group.vendors.find(v => v.id === targetId);
+                const sourceVendors = group.vendors.filter(v => v.id !== targetId);
+                const totalSourceInvoices = sourceVendors.reduce((s, v) => s + (v.invoice_count || 0), 0);
+                const isMerging = mergingGroup === group.key;
+                const isConfirming = mergeConfirm === group.key;
+
+                return (
+                  <div key={group.key} className="bg-white border border-slate-200 rounded-xl p-5">
+                    {/* Group header */}
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-2">
+                        <span className={`px-2 py-0.5 text-xs font-semibold rounded-full ${
+                          group.matchType === 'gstin' ? 'bg-red-100 text-red-700' :
+                          group.matchType === 'pan' ? 'bg-orange-100 text-orange-700' :
+                          'bg-blue-100 text-blue-700'
+                        }`}>
+                          {group.matchType.toUpperCase()}
+                        </span>
+                        <span className="text-sm font-medium text-slate-600">{group.key}</span>
+                      </div>
+
+                      {isConfirming ? (
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-slate-500">
+                            Merge {totalSourceInvoices} invoice{totalSourceInvoices !== 1 ? 's' : ''} into {targetVendor?.vendor_name}?
+                          </span>
+                          <button
+                            onClick={() => executeMerge(group)}
+                            disabled={isMerging}
+                            className="px-3 py-1.5 text-xs font-semibold bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50"
+                          >
+                            {isMerging ? 'Merging…' : 'Confirm'}
+                          </button>
+                          <button
+                            onClick={() => setMergeConfirm(null)}
+                            className="px-3 py-1.5 text-xs font-semibold border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setMergeConfirm(group.key)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-amber-700 border border-amber-200 rounded-lg hover:bg-amber-50 transition-colors"
+                        >
+                          <GitMerge size={12} />
+                          Merge Group
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Vendor cards */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                      {group.vendors.map(v => {
+                        const isTarget = v.id === targetId;
+                        return (
+                          <div
+                            key={v.id}
+                            onClick={() => setMergeTargets(prev => ({ ...prev, [group.key]: v.id }))}
+                            className={`relative p-4 rounded-lg border-2 cursor-pointer transition-all ${
+                              isTarget
+                                ? 'border-emerald-400 bg-emerald-50'
+                                : 'border-slate-200 bg-slate-50 hover:border-slate-300'
+                            }`}
+                          >
+                            {isTarget && (
+                              <span className="absolute -top-2 left-3 px-2 py-0.5 text-[10px] font-bold bg-emerald-500 text-white rounded-full uppercase">
+                                Keep
+                              </span>
+                            )}
+                            {!isTarget && (
+                              <span className="absolute -top-2 left-3 px-2 py-0.5 text-[10px] font-bold bg-slate-400 text-white rounded-full uppercase">
+                                Merge into primary
+                              </span>
+                            )}
+                            <p className="font-semibold text-sm text-slate-900 mt-1 truncate">{v.vendor_name}</p>
+                            <p className="text-xs text-slate-400 mt-0.5">{v.vendor_code}</p>
+                            <div className="flex items-center justify-between mt-2">
+                              <span className="text-xs text-slate-500">{v.invoice_count || 0} invoices</span>
+                              <span className="text-xs font-semibold text-slate-700">{formatCurrency(v.total_amount || 0)}</span>
+                            </div>
+                            {v.gstin && (
+                              <p className="text-[10px] text-slate-400 mt-1.5 font-mono">{v.gstin}</p>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Merge summary */}
+                    <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
+                      <ChevronRight size={12} />
+                      <span>
+                        Will keep <strong className="text-emerald-700">{targetVendor?.vendor_name}</strong>
+                        {totalSourceInvoices > 0 && <>, reassign {totalSourceInvoices} invoice{totalSourceInvoices !== 1 ? 's' : ''}</>}
+                        , and delete {sourceVendors.length} duplicate{sourceVendors.length !== 1 ? 's' : ''}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Normal vendor grid (hidden in merge mode) */}
+      {!mergeMode && (loading ? (
         <div className="flex items-center justify-center py-24">
           <div className="animate-spin w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full" />
         </div>
@@ -337,7 +528,7 @@ export default function Vendors() {
             </div>
           ))}
         </div>
-      )}
+      ))}
     </div>
   );
 }
